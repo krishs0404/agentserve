@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+*.log
+
+# Models (large binary files)
+models/
+*.pt
+*.safetensors
+*.bin
+
+# Results
+results/*.json
+results/*.png
+
+# Recorded traces (user-generated, not committed)
+traces/recorded_*.jsonl
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Ruff cache
+.ruff_cache/
