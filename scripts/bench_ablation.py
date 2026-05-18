@@ -207,7 +207,7 @@ def run_vllm(model_dir: str, requests: list[Request], max_tokens: int) -> dict |
         print("  vLLM not installed — skipping. Install with: pip install vllm")
         return None
 
-    llm = LLM(model=model_dir, dtype="float16")
+    llm = LLM(model=model_dir, dtype="float16", gpu_memory_utilization=0.80)
     params = SamplingParams(max_tokens=max_tokens, temperature=1.0)
     prompts = [r.prompt for r in requests]
 
