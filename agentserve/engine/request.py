@@ -70,6 +70,12 @@ class Request:
     # Tokens already processed by prefill (for prefix cache hit tracking)
     num_cached_tokens: int = 0
 
+    # Trajectory fields — set when this request is one step of a multi-step trajectory
+    trajectory_id: str | None = None   # shared ID across all steps of one trajectory
+    step_index: int = 0                # 0-indexed step number within the trajectory
+    total_steps: int = 1               # total steps in this trajectory
+    deadline: float = float("inf")     # monotonic wall-clock deadline for the trajectory
+
     @property
     def num_prompt_tokens(self) -> int:
         return len(self.token_ids)

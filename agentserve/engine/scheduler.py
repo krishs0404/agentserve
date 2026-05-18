@@ -38,10 +38,15 @@ Three agent-aware policies (all disabled in baseline_mode=True):
 """
 
 from __future__ import annotations
+
+import bisect
 from collections import deque
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 from agentserve.engine.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from agentserve.engine.policies import SchedulerPolicy
 
 
 class Scheduler:
@@ -56,6 +61,7 @@ class Scheduler:
         enable_priority: bool = True,
         enable_overflow: bool = True,
         enable_preemption: bool = True,
+        policy: "Optional[SchedulerPolicy]" = None,
     ):
         """
         Args:
@@ -82,6 +88,12 @@ class Scheduler:
 
         self.soft_cap = int(max_batch_size * overflow_factor)
 
+        # Pluggable policy (when set, bypasses the three-deque logic entirely)
+        self.policy = policy
+        # Sorted list of (key_tuple, sequence_number, req) — key from policy.priority_key
+        self._policy_pending: list = []
+        self._policy_seq: int = 0
+
         # Three O(1) FIFO queues for agent-aware mode, one per priority level
         self._pending_easy:   deque[Request] = deque()
         self._pending_medium: deque[Request] = deque()
@@ -105,6 +117,8 @@ class Scheduler:
     @property
     def pending(self) -> deque:
         """Combined view of all pending requests in priority order."""
+        if self.policy is not None:
+            return deque(item[2] for item in self._policy_pending)
         if self.baseline_mode or not self.enable_priority:
             return deque(self._pending_baseline)
         combined = deque()
@@ -117,14 +131,21 @@ class Scheduler:
     # ------------------------------------------------------------------
 
     def add(self, request: Request) -> None:
-        """Add a new request to the pending queue. O(1)."""
+        """Add a new request to the pending queue."""
         request.status = RequestStatus.PENDING
+        if self.policy is not None:
+            key = self.policy.priority_key(request)
+            bisect.insort(self._policy_pending, (key, self._policy_seq, request))
+            self._policy_seq += 1
+            return
         if self.baseline_mode or not self.enable_priority:
             self._pending_baseline.append(request)
         else:
             self._priority_queues[request.priority].append(request)
 
     def is_finished(self) -> bool:
+        if self.policy is not None:
+            return not self._policy_pending and not self.decoding
         if self.baseline_mode or not self.enable_priority:
             return not self._pending_baseline and not self.decoding
         return (
@@ -190,6 +211,8 @@ class Scheduler:
             request.mark_done()
             self.decoding.remove(request)
             self.completed.append(request)
+            if self.policy is not None:
+                self.policy.on_request_complete(request)
 
         return done
 
@@ -205,6 +228,8 @@ class Scheduler:
 
     def _next_pending_candidate(self) -> Optional[Request]:
         """Peek at the highest-priority pending request without removing it."""
+        if self.policy is not None:
+            return self._policy_pending[0][2] if self._policy_pending else None
         if self.baseline_mode or not self.enable_priority:
             return self._pending_baseline[0] if self._pending_baseline else None
         for q in (self._pending_easy, self._pending_medium, self._pending_hard):
@@ -214,6 +239,8 @@ class Scheduler:
 
     def _pop_front_pending(self) -> Request:
         """Remove and return the highest-priority pending request."""
+        if self.policy is not None:
+            return self._policy_pending.pop(0)[2]
         if self.baseline_mode or not self.enable_priority:
             return self._pending_baseline.popleft()
         for q in (self._pending_easy, self._pending_medium, self._pending_hard):

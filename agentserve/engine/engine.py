@@ -36,6 +36,7 @@ from agentserve.engine.cache import BlockAllocator
 from agentserve.engine.prefix_cache import PrefixCache
 from agentserve.engine.difficulty import RequestDifficultyClassifier
 from agentserve.engine.sampling import sample
+from agentserve.engine.policies import SchedulerPolicy
 
 
 @dataclass
@@ -93,6 +94,7 @@ class Engine:
         enable_priority: bool = True,
         enable_overflow: bool = True,
         enable_preemption: bool = True,
+        scheduler_policy: Optional[SchedulerPolicy] = None,
     ):
         self.config = config
         self.eos_token_id = eos_token_id
@@ -125,6 +127,7 @@ class Engine:
             enable_priority=enable_priority,
             enable_overflow=enable_overflow,
             enable_preemption=enable_preemption,
+            policy=scheduler_policy,
         )
 
         # KV-cache block allocator

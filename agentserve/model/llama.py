@@ -174,12 +174,16 @@ class LlamaAttention(nn.Module):
         # In prefill: full lower-triangular mask over the prompt
         # In decode: T=1 so the mask is trivially all-attend (single query)
         if T > 1:
-            # [T, T_total] causal mask (T_total >= T when there's a cached prefix)
-            # Use scores.dtype to avoid upcasting fp16 scores to float32
-            mask = torch.full((T, T_total), float("-inf"), device=x.device, dtype=scores.dtype)
+            # [T, T_total] causal mask (T_total >= T when there's a KV-cache prefix)
+            # Cached positions (columns 0..offset-1): all attend (zeros)
+            # New positions (columns offset..T_total-1): upper-triangular -inf
             offset = T_total - T
-            mask[:, :offset] = 0.0
-            mask = mask + torch.triu(torch.full((T, T), float("-inf"), device=x.device, dtype=scores.dtype), diagonal=1)
+            mask = torch.zeros(T, T_total, device=x.device, dtype=scores.dtype)
+            causal = torch.triu(
+                torch.full((T, T), float("-inf"), device=x.device, dtype=scores.dtype),
+                diagonal=1,
+            )
+            mask[:, offset:] = causal
             scores = scores + mask.unsqueeze(0)
 
         # Compute softmax in float32 for numerical stability, cast back to working dtype
