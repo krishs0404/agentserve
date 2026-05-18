@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from agentserve.engine.engine import Engine
 from agentserve.engine.request import Request
-from agentserve.model.config import TinyConfig
+from agentserve.model.config import TinyConfig, Llama32_1B, Llama32_3B, Llama32_8B
+from bench_ablation import build_tokenizer
 
 
 def load_trace(path: str) -> list[dict]:
@@ -35,7 +36,12 @@ def load_trace(path: str) -> list[dict]:
     return records
 
 
-def replay_trace(trace: list[dict], engine: Engine, use_mock: bool) -> dict:
+def replay_trace(
+    trace: list[dict],
+    engine: Engine,
+    use_mock: bool,
+    model_dir: str | None = None,
+) -> dict:
     """
     Replay a trace through the engine respecting arrival_delay_ms.
     Runs engine steps in a tight loop; requests are injected at their
@@ -44,6 +50,8 @@ def replay_trace(trace: list[dict], engine: Engine, use_mock: bool) -> dict:
     if not trace:
         return {}
 
+    tokenize = build_tokenizer(model_dir, use_mock)
+
     t0 = time.monotonic()
     submitted = [False] * len(trace)
     all_requests: list[Request] = []
@@ -51,10 +59,9 @@ def replay_trace(trace: list[dict], engine: Engine, use_mock: bool) -> dict:
     # Pre-build Request objects
     for record in trace:
         prompt = record["prompt"]
-        token_ids = [ord(c) % 256 for c in prompt]  # simple stand-in tokeniser
         req = Request(
             prompt=prompt,
-            token_ids=token_ids,
+            token_ids=tokenize(prompt),
             max_tokens=64,
         )
         all_requests.append(req)
@@ -120,10 +127,16 @@ def main():
     parser = argparse.ArgumentParser(description="Replay an agent trace through AgentServe")
     parser.add_argument("--trace", default="traces/synthetic_50.jsonl")
     parser.add_argument("--use-mock", action="store_true", default=True)
+    parser.add_argument("--model-dir", default=None,
+                        help="Path to HuggingFace model dir (enables real tokenizer + model)")
+    parser.add_argument("--model-size", default="1b", choices=["1b", "3b", "8b"])
     parser.add_argument("--agent-aware", action="store_true", default=False)
     parser.add_argument("--baseline", action="store_true", default=False)
     parser.add_argument("--compare", action="store_true", default=False)
     args = parser.parse_args()
+
+    if args.model_dir:
+        args.use_mock = False
 
     trace_path = os.path.join(os.path.dirname(__file__), "..", args.trace)
     if not os.path.exists(trace_path):
@@ -136,14 +149,21 @@ def main():
 
     run_both = args.compare or (not args.agent_aware and not args.baseline)
 
+    if args.model_dir:
+        config = {"1b": Llama32_1B, "3b": Llama32_3B, "8b": Llama32_8B}[args.model_size]
+    else:
+        config = TinyConfig
+
     if args.agent_aware or run_both:
-        engine = Engine(config=TinyConfig, use_mock=args.use_mock, agent_aware=True)
-        result = replay_trace(trace, engine, args.use_mock)
+        engine = Engine(config=config, use_mock=args.use_mock, agent_aware=True,
+                        model_dir=args.model_dir)
+        result = replay_trace(trace, engine, args.use_mock, args.model_dir)
         print_result("AGENT-AWARE", result)
 
     if args.baseline or run_both:
-        engine = Engine(config=TinyConfig, use_mock=args.use_mock, agent_aware=False)
-        result = replay_trace(trace, engine, args.use_mock)
+        engine = Engine(config=config, use_mock=args.use_mock, agent_aware=False,
+                        model_dir=args.model_dir)
+        result = replay_trace(trace, engine, args.use_mock, args.model_dir)
         print_result("BASELINE (FIFO)", result)
 
 

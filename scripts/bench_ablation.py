@@ -34,12 +34,33 @@ import os
 import statistics
 import sys
 import time
+from typing import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from agentserve.engine.engine import Engine
 from agentserve.engine.request import Request
 from agentserve.model.config import TinyConfig, Llama32_1B, Llama32_3B, Llama32_8B
+
+
+def build_tokenizer(model_dir: str | None, use_mock: bool) -> Callable[[str], list[int]]:
+    """Return a tokenize(text) -> list[int] function.
+
+    Uses the real Llama tokenizer when model_dir is provided; falls back to
+    ord(c) % 256 for mock/CPU runs.  The fake tokenizer is fast and keeps tests
+    dependency-free, but it produces ~3-5× more tokens than BPE for the same
+    prompt — fine for intra-mode comparison, misleading for vLLM throughput.
+    """
+    if model_dir and not use_mock:
+        try:
+            from transformers import AutoTokenizer
+            tok = AutoTokenizer.from_pretrained(model_dir)
+            print(f"  Loaded tokenizer from {model_dir} (vocab size {tok.vocab_size})")
+            return lambda text: tok.encode(text, add_special_tokens=False)
+        except Exception as e:
+            print(f"  WARNING: could not load tokenizer from {model_dir}: {e}")
+            print("  Falling back to ord(c) % vocab_size fake tokenizer.")
+    return lambda text: [ord(c) % 256 for c in text]
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
@@ -75,7 +96,12 @@ HARD = [
 ]
 
 
-def make_workload(n: int, max_tokens: int, seed: int = 42) -> list[Request]:
+def make_workload(
+    n: int,
+    max_tokens: int,
+    tokenize: Callable[[str], list[int]],
+    seed: int = 42,
+) -> list[Request]:
     """Generate a realistic agent workload: 60% easy, 25% medium, 15% hard."""
     import random
     rng = random.Random(seed)
@@ -94,7 +120,7 @@ def make_workload(n: int, max_tokens: int, seed: int = 42) -> list[Request]:
     return [
         Request(
             prompt=p,
-            token_ids=[ord(c) % 256 for c in p],
+            token_ids=tokenize(p),
             max_tokens=max_tokens,
         )
         for p in prompts
@@ -150,20 +176,25 @@ def run_mode(
     def p95(xs):  return sorted(xs)[int(len(xs) * 0.95)] if len(xs) >= 2 else (xs[0] if xs else 0.0)
 
     return {
-        "label":            label,
-        "wall_s":           wall,
-        "throughput_tps":   output_tokens / wall if wall > 0 else 0,
-        "mean_ttft_s":      mean(ttfts),
-        "easy_mean_lat_s":  mean(by_diff["easy"]),
-        "med_mean_lat_s":   mean(by_diff["medium"]),
-        "hard_mean_lat_s":  mean(by_diff["hard"]),
-        "easy_p95_lat_s":   p95(by_diff["easy"]),
-        "hard_p95_lat_s":   p95(by_diff["hard"]),
-        "prefix_hit_rate":  engine.metrics.prefix_hit_rate,
-        "n_easy":           engine.metrics.difficulty_counts.get("easy",   0),
-        "n_medium":         engine.metrics.difficulty_counts.get("medium", 0),
-        "n_hard":           engine.metrics.difficulty_counts.get("hard",   0),
-        "steps":            engine.metrics.steps,
+        "label":              label,
+        "wall_s":             wall,
+        "throughput_tps":     output_tokens / wall if wall > 0 else 0,
+        "mean_ttft_s":        mean(ttfts),
+        "easy_mean_lat_s":    mean(by_diff["easy"]),
+        "med_mean_lat_s":     mean(by_diff["medium"]),
+        "hard_mean_lat_s":    mean(by_diff["hard"]),
+        "easy_p95_lat_s":     p95(by_diff["easy"]),
+        "hard_p95_lat_s":     p95(by_diff["hard"]),
+        "prefix_hit_rate":    engine.metrics.prefix_hit_rate,
+        "n_easy":             engine.metrics.difficulty_counts.get("easy",   0),
+        "n_medium":           engine.metrics.difficulty_counts.get("medium", 0),
+        "n_hard":             engine.metrics.difficulty_counts.get("hard",   0),
+        "steps":              engine.metrics.steps,
+        # Raw latency arrays — consumed by plot_results.py to draw CDFs
+        "easy_latencies":     by_diff["easy"],
+        "medium_latencies":   by_diff["medium"],
+        "hard_latencies":     by_diff["hard"],
+        "all_ttfts":          ttfts,
     }
 
 
@@ -286,7 +317,8 @@ def main():
     else:
         config = Llama32_8B
 
-    workload = make_workload(args.num_requests, args.max_tokens)
+    tokenize = build_tokenizer(args.model_dir, args.use_mock)
+    workload = make_workload(args.num_requests, args.max_tokens, tokenize=tokenize)
     print(f"Workload: {args.num_requests} requests  "
           f"({sum(1 for r in workload if 'classify' in r.prompt.lower() or 'true or false' in r.prompt.lower() or 'yes or no' in r.prompt.lower())} easy-ish), "
           f"max_tokens={args.max_tokens}, batch={args.max_batch}")
