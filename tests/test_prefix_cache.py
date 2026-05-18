@@ -32,7 +32,7 @@ def make_blocks(n_blocks: int, start: int = 0) -> list[int]:
 class TestBasicStoreAndLookup:
     def test_miss_on_empty_cache(self, cache):
         tokens = make_tokens(8)
-        length, blocks = cache.find_longest_prefix(tokens)
+        length, blocks, _ = cache.find_longest_prefix(tokens)
         assert length == 0
         assert blocks == []
 
@@ -40,7 +40,7 @@ class TestBasicStoreAndLookup:
         tokens = make_tokens(8)
         block_ids = make_blocks(2)
         cache.store(tokens, block_ids)
-        length, blocks = cache.find_longest_prefix(tokens)
+        length, blocks, _ = cache.find_longest_prefix(tokens)
         assert length == 8
         assert blocks == block_ids
 
@@ -50,7 +50,7 @@ class TestBasicStoreAndLookup:
         tokens_long  = make_tokens(16)
         block_ids = make_blocks(2)
         cache.store(tokens_short, block_ids)
-        length, blocks = cache.find_longest_prefix(tokens_long)
+        length, blocks, _ = cache.find_longest_prefix(tokens_long)
         assert length == 8
         assert blocks == block_ids
 
@@ -61,14 +61,14 @@ class TestBasicStoreAndLookup:
         cache.store(tokens_4, [10])
         # look up 6 tokens (first 4 match a full block, last 2 do not form a complete block)
         tokens_6 = make_tokens(6)
-        length, _ = cache.find_longest_prefix(tokens_6)
+        length, _, _ = cache.find_longest_prefix(tokens_6)
         assert length == 4
 
     def test_different_prefix_no_match(self, cache):
         tokens_a = make_tokens(8, start=0)
         tokens_b = make_tokens(8, start=100)
         cache.store(tokens_a, make_blocks(2, 0))
-        length, _ = cache.find_longest_prefix(tokens_b)
+        length, _, _ = cache.find_longest_prefix(tokens_b)
         assert length == 0
 
 
@@ -82,7 +82,7 @@ class TestLongestPrefixSelection:
         cache.store(tokens_4, make_blocks(1, 10))
         cache.store(tokens_8, make_blocks(2, 20))
 
-        length, blocks = cache.find_longest_prefix(tokens_12)
+        length, blocks, _ = cache.find_longest_prefix(tokens_12)
         assert length == 8
         assert blocks == make_blocks(2, 20)
 
@@ -143,7 +143,7 @@ class TestLFUEviction:
         cache.store(new_tokens, [3])
 
         # Popular entry should still be there
-        length, _ = cache.find_longest_prefix(popular_tokens)
+        length, _, _ = cache.find_longest_prefix(popular_tokens)
         assert length == 4, "High-reuse prefix should survive eviction"
 
     def test_lfu_evicts_lowest_reuse_first(self):
@@ -166,9 +166,9 @@ class TestLFUEviction:
         cache.store(tok_c, [2])
 
         # B should be gone
-        length_b, _ = cache.find_longest_prefix(tok_b)
+        length_b, _, _ = cache.find_longest_prefix(tok_b)
         # A should still be there
-        length_a, _ = cache.find_longest_prefix(tok_a)
+        length_a, _, _ = cache.find_longest_prefix(tok_a)
         assert length_a == 4, "A (popular) should still be cached"
         # B is evicted — it may or may not be re-stored depending on implementation
         # The important thing is that evictions happened
@@ -177,7 +177,7 @@ class TestLFUEviction:
 
 class TestEdgeCases:
     def test_empty_token_list(self, cache):
-        length, blocks = cache.find_longest_prefix([])
+        length, blocks, _ = cache.find_longest_prefix([])
         assert length == 0
         assert blocks == []
 
@@ -189,7 +189,7 @@ class TestEdgeCases:
         """Tokens shorter than block_size can't form a complete block → always miss."""
         short_tokens = make_tokens(BLOCK_SIZE - 1)
         cache.store(short_tokens, [])
-        length, _ = cache.find_longest_prefix(short_tokens)
+        length, _, _ = cache.find_longest_prefix(short_tokens)
         assert length == 0
 
     def test_clear_empties_cache(self, cache):
@@ -197,5 +197,5 @@ class TestEdgeCases:
         cache.store(tokens, make_blocks(2))
         cache.clear()
         assert cache.size() == 0
-        length, _ = cache.find_longest_prefix(tokens)
+        length, _, _ = cache.find_longest_prefix(tokens)
         assert length == 0

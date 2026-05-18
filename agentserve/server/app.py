@@ -129,9 +129,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         except Exception:
             pass  # run without tokenizer
 
+    # Single background task drives the engine loop.
+    # All HTTP handlers submit requests and await completion; this task
+    # batches them together so continuous batching actually works.
+    async def _engine_loop() -> None:
+        while True:
+            if not _engine._is_idle():
+                await asyncio.to_thread(_engine.step)
+            else:
+                await asyncio.sleep(0.001)
+
+    engine_task = asyncio.create_task(_engine_loop())
+
     yield  # app is running
 
-    # Cleanup (model references released on GC)
+    engine_task.cancel()
     _engine = None
     _tokenizer = None
 
@@ -190,12 +202,9 @@ async def chat_completions(req: ChatCompletionRequest):
     )
     engine.submit(agentserve_req)
 
-    # Run engine steps until this request completes
-    max_steps = req.max_tokens + len(token_ids) + 100
-    for _ in range(max_steps):
-        if agentserve_req.is_done:
-            break
-        await asyncio.to_thread(engine.step)
+    # Wait for the background engine loop to complete this request
+    while not agentserve_req.is_done:
+        await asyncio.sleep(0.001)
 
     output_text = _tokens_to_text(agentserve_req.output_token_ids)
 

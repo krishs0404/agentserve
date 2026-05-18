@@ -83,11 +83,16 @@ class Engine:
         max_prefill_per_step: int = 4,
         num_cache_blocks: int = 256,
         block_size: int = 16,
-        eos_token_id: int = 1,
+        eos_token_id: int = 2,
         max_prefix_cache_entries: int = 512,
         temperature: float = 1.0,
         top_p: float = 1.0,
         top_k: int = 0,
+        model_dir: Optional[str] = None,
+        device: Optional[str] = None,
+        enable_priority: bool = True,
+        enable_overflow: bool = True,
+        enable_preemption: bool = True,
     ):
         self.config = config
         self.eos_token_id = eos_token_id
@@ -95,17 +100,31 @@ class Engine:
         self.top_p = top_p
         self.top_k = top_k
 
+        # Resolve device: explicit arg > CUDA if available > CPU
+        if device is None:
+            import torch
+            device = "cuda" if (not use_mock and torch.cuda.is_available()) else "cpu"
+        self.device = device
+
         # Model: real or mock
         if use_mock:
             self.model = MockModel(config)
         else:
             self.model = LlamaModel(config)
+            if model_dir is not None:
+                from agentserve.model.loader import load_weights
+                load_weights(self.model, model_dir)
+            self.model = self.model.to(device)
+            self.model.eval()
 
         # Scheduler: agent-aware or plain FIFO baseline
         self.scheduler = Scheduler(
             max_batch_size=max_batch_size,
             max_prefill_per_step=max_prefill_per_step,
             baseline_mode=not agent_aware,
+            enable_priority=enable_priority,
+            enable_overflow=enable_overflow,
+            enable_preemption=enable_preemption,
         )
 
         # KV-cache block allocator
@@ -176,13 +195,9 @@ class Engine:
         for req in prefill_batch:
             self._prefill(req)
 
-        # 3. Decode: one token per active decode-phase request
+        # 3. Decode: one batched forward pass for all active decode-phase requests
         decode_batch = self.scheduler.get_decode_batch()
-        newly_done: List[Request] = []
-        for req in decode_batch:
-            done = self._decode_step(req)
-            if done:
-                newly_done.append(req)
+        newly_done: List[Request] = self._decode_batch(decode_batch) if decode_batch else []
 
         # 4. Free block-allocator resources for completed requests
         for req in newly_done:
@@ -215,12 +230,14 @@ class Engine:
             req.priority = diff.priority
             req.estimated_output_tokens = diff.estimated_output_tokens
 
-            # Check prefix cache to skip redundant prefill
-            matched_len, _ = self.prefix_cache.find_longest_prefix(req.token_ids)
+            # Check prefix cache — on hit, seed req.kv_cache so prefill skips those tokens
+            matched_len, _, cached_kv = self.prefix_cache.find_longest_prefix(req.token_ids)
             req.num_cached_tokens = matched_len
             if matched_len > 0:
                 self.metrics.prefix_cache_hits += 1
                 self.metrics.prefix_tokens_saved += matched_len
+                if cached_kv is not None:
+                    req.kv_cache = cached_kv  # seed forward pass with real cached KV
             else:
                 self.metrics.prefix_cache_misses += 1
 
@@ -264,33 +281,45 @@ class Engine:
             self.scheduler.decoding.remove(req)
             self.scheduler.completed.append(req)
 
-        # Store prefix in cache so future requests with same prompt skip prefill
+        # Store prefix in cache so future requests with same prompt skip prefill.
+        # Include the actual KV tensors so future hits can seed the forward pass.
         complete_blocks_len = (len(req.token_ids) // self.prefix_cache.block_size) * self.prefix_cache.block_size
         if complete_blocks_len > 0:
             block_ids = self.allocator.blocks_for(req.request_id)
-            self.prefix_cache.store(req.token_ids[:complete_blocks_len], block_ids)
+            kv_for_cache = None
+            if req.kv_cache is not None:
+                kv_for_cache = [
+                    (req.kv_cache[i][0][:complete_blocks_len].detach().clone(),
+                     req.kv_cache[i][1][:complete_blocks_len].detach().clone())
+                    for i in range(len(req.kv_cache))
+                ]
+            self.prefix_cache.store(req.token_ids[:complete_blocks_len], block_ids, kv_for_cache)
 
-    def _decode_step(self, req: Request) -> bool:
-        """Generate one more token for a decode-phase request.
+    def _decode_batch(self, decode_batch: List[Request]) -> List[Request]:
+        """One batched forward pass for all decode-phase requests.
 
-        Returns True if the request is now complete.
+        Replaces the old per-request _decode_step loop: all B requests are
+        processed in a single model.forward_decode_batch call, amortising
+        weight reads across the batch.
         """
-        # Feed last generated token
-        last_token = req.output_token_ids[-1]
-        position = req.num_cached_tokens + req.num_output_tokens - 1
+        last_tokens = [req.output_token_ids[-1] for req in decode_batch]
+        positions   = [req.num_cached_tokens + req.num_output_tokens - 1 for req in decode_batch]
+        kv_caches   = [req.kv_cache for req in decode_batch]
 
-        logits, kv_cache = self.model.forward(
-            token_ids=[last_token],
-            kv_cache=req.kv_cache,
-            position_offset=position,
+        logits_batch, new_kv_caches = self.model.forward_decode_batch(
+            last_token_ids=last_tokens,
+            kv_caches=kv_caches,
+            position_offsets=positions,
         )
-        req.kv_cache = kv_cache
 
-        # Sample next token
-        next_token = int(self._sample(logits[-1:]).item())
-
-        done = self.scheduler.on_decode_step(req, next_token, self.eos_token_id)
-        return done
+        newly_done: List[Request] = []
+        for i, req in enumerate(decode_batch):
+            req.kv_cache = new_kv_caches[i]
+            next_token = int(self._sample(logits_batch[i : i + 1]).item())
+            done = self.scheduler.on_decode_step(req, next_token, self.eos_token_id)
+            if done:
+                newly_done.append(req)
+        return newly_done
 
     def _sample(self, logits: torch.Tensor) -> torch.Tensor:
         """Sample token(s) from logits using engine-level sampling params."""

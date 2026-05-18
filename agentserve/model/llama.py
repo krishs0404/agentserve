@@ -265,6 +265,122 @@ class LlamaModel(nn.Module):
         self.register_buffer("rope_table", cos_sin, persistent=False)  # [max_seq_len, head_dim]
 
     @torch.inference_mode()
+    def forward_decode_batch(
+        self,
+        last_token_ids: list[int],
+        kv_caches: list,
+        position_offsets: list[int],
+    ) -> tuple[torch.Tensor, list]:
+        """Batched single-token decode for B requests in one forward pass.
+
+        Processes all requests simultaneously instead of looping over them
+        individually, amortising weight reads across the batch.
+
+        Args:
+            last_token_ids:   [B] most-recently-generated token for each request.
+            kv_caches:        B lists, each is n_layers × (k[L_b, Kh, D], v[L_b, Kh, D]).
+            position_offsets: Current absolute sequence position for each request.
+
+        Returns:
+            logits:        [B, vocab_size]
+            new_kv_caches: B lists of n_layers × (k[L_b+1, Kh, D], v[L_b+1, Kh, D])
+        """
+        B = len(last_token_ids)
+        if B == 0:
+            return torch.zeros(0, self.config.vocab_size), []
+
+        device = self.rope_table.device
+
+        tokens = torch.tensor(last_token_ids, dtype=torch.long, device=device)
+        x = self.embed(tokens)  # [B, hidden_dim]
+
+        positions = torch.tensor(position_offsets, dtype=torch.long, device=device)
+        cos_sin_batch = self.rope_table[positions]  # [B, head_dim]
+
+        new_kv_caches: list = [[] for _ in range(B)]
+        Kh = self.config.n_kv_heads
+        D = self.config.head_dim
+        H = self.config.n_heads
+        n_groups = H // Kh
+
+        for layer_idx, layer in enumerate(self.layers):
+            layer_kvs = [kv_caches[b][layer_idx] for b in range(B)]
+            seq_lens = [int(kv[0].shape[0]) for kv in layer_kvs]
+            max_len = max(seq_lens)
+
+            # Pad KV caches to [B, max_len, Kh, D]
+            k_padded = x.new_zeros(B, max_len, Kh, D)
+            v_padded = x.new_zeros(B, max_len, Kh, D)
+            for b, (k_b, v_b) in enumerate(layer_kvs):
+                L = seq_lens[b]
+                k_padded[b, :L] = k_b.to(dtype=x.dtype, device=x.device)
+                v_padded[b, :L] = v_b.to(dtype=x.dtype, device=x.device)
+
+            # Pre-norm, project Q/K/V for new token
+            h = layer.attn_norm(x)                              # [B, hidden_dim]
+            q   = layer.attn.q_proj(h).view(B, H, D)           # [B, H, D]
+            k_n = layer.attn.k_proj(h).view(B, Kh, D)          # [B, Kh, D]
+            v_n = layer.attn.v_proj(h).view(B, Kh, D)          # [B, Kh, D]
+
+            # Apply RoPE — apply_rope treats leading dim as sequence dim
+            q   = apply_rope(q,   cos_sin_batch)  # [B, H, D]
+            k_n = apply_rope(k_n, cos_sin_batch)  # [B, Kh, D]
+
+            # Concatenate new K/V to padded history
+            k_full = torch.cat([k_padded, k_n.unsqueeze(1)], dim=1)  # [B, max_len+1, Kh, D]
+            v_full = torch.cat([v_padded, v_n.unsqueeze(1)], dim=1)  # [B, max_len+1, Kh, D]
+            total_len = max_len + 1
+
+            # GQA expansion: repeat KV heads to match Q heads
+            if n_groups > 1:
+                k_exp = (k_full.unsqueeze(3)
+                               .expand(B, total_len, Kh, n_groups, D)
+                               .reshape(B, total_len, H, D))
+                v_exp = (v_full.unsqueeze(3)
+                               .expand(B, total_len, Kh, n_groups, D)
+                               .reshape(B, total_len, H, D))
+            else:
+                k_exp = k_full  # [B, total_len, H, D]
+                v_exp = v_full
+
+            # Batched attention: q [B, H, 1, D] × k [B, H, D, total_len]
+            q_4d = q.unsqueeze(2)                   # [B, H, 1, D]
+            k_4d = k_exp.transpose(1, 2)            # [B, H, total_len, D]
+            v_4d = v_exp.transpose(1, 2)            # [B, H, total_len, D]
+
+            scores = torch.matmul(q_4d, k_4d.transpose(2, 3)) * layer.attn.scale  # [B, H, 1, total_len]
+
+            # Mask padded positions for requests with shorter histories
+            min_len = min(seq_lens)
+            if min_len < max_len:
+                mask = scores.new_zeros(B, 1, 1, total_len)
+                for b in range(B):
+                    if seq_lens[b] < max_len:
+                        mask[b, 0, 0, seq_lens[b]:max_len] = float("-inf")
+                scores = scores + mask
+
+            attn = F.softmax(scores.float(), dim=-1).to(x.dtype)  # [B, H, 1, total_len]
+            out = torch.matmul(attn, v_4d)                         # [B, H, 1, D]
+            out = out.squeeze(2).transpose(1, 2).reshape(B, H * D) # [B, H*D]
+            attn_out = layer.attn.o_proj(out)                       # [B, hidden_dim]
+
+            # Pre-norm residuals
+            x = x + attn_out
+            x = x + layer.ffn(layer.ffn_norm(x))
+
+            # Save unpadded KV for each request
+            for b in range(B):
+                L = seq_lens[b]
+                new_kv_caches[b].append((
+                    k_full[b, :L + 1].detach(),
+                    v_full[b, :L + 1].detach(),
+                ))
+
+        x = self.norm(x)           # [B, hidden_dim]
+        logits = self.lm_head(x)   # [B, vocab_size]
+        return logits, new_kv_caches
+
+    @torch.inference_mode()
     def forward(
         self,
         token_ids: list[int] | torch.Tensor,
@@ -318,6 +434,39 @@ class MockModel:
         self.config = config
         self.rng = torch.Generator()
         self.rng.manual_seed(seed)
+
+    def forward_decode_batch(
+        self,
+        last_token_ids: list[int],
+        kv_caches: list,
+        position_offsets: list[int],
+    ) -> tuple[torch.Tensor, list]:
+        """Batched decode step for MockModel — random logits, simulated KV accumulation."""
+        B = len(last_token_ids)
+        cfg = self.config
+        Kh = cfg.n_kv_heads
+        D = cfg.head_dim
+
+        logits = torch.randn(B, cfg.vocab_size, generator=self.rng)
+
+        new_slice_k = torch.zeros(1, Kh, D)
+        new_slice_v = torch.zeros(1, Kh, D)
+
+        new_kv_caches = []
+        for b in range(B):
+            req_kv = []
+            for i in range(cfg.n_layers):
+                if kv_caches[b] is None:
+                    req_kv.append((new_slice_k.clone(), new_slice_v.clone()))
+                else:
+                    k_cache, v_cache = kv_caches[b][i]
+                    req_kv.append((
+                        torch.cat([k_cache, new_slice_k], dim=0),
+                        torch.cat([v_cache, new_slice_v], dim=0),
+                    ))
+            new_kv_caches.append(req_kv)
+
+        return logits, new_kv_caches
 
     def forward(
         self,

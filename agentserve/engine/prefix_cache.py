@@ -35,6 +35,7 @@ from typing import Dict, List, Tuple, Optional
 class PrefixEntry:
     token_ids: List[int]       # full token sequence for this cached prefix
     block_ids: List[int]       # KV-cache block IDs holding the KV tensors
+    kv_tensors: Optional[list] = None  # per-layer (k, v) tensors for this prefix
     reuse_count: int = 0       # how many times this prefix has been hit
     last_access_step: int = 0  # engine step counter, for tie-breaking
 
@@ -106,11 +107,13 @@ class PrefixCache:
     # Public API
     # ------------------------------------------------------------------
 
-    def store(self, token_ids: List[int], block_ids: List[int]) -> None:
+    def store(self, token_ids: List[int], block_ids: List[int], kv_tensors: Optional[list] = None) -> None:
         """Store a computed prefix in the cache.
 
         token_ids must be a multiple of block_size (complete blocks only).
         block_ids corresponds 1-to-1 with the blocks covering token_ids.
+        kv_tensors is a list of per-layer (k, v) tensor tuples; when provided,
+        future hits will seed the request's kv_cache so prefill skips those tokens.
         """
         if len(token_ids) == 0:
             return
@@ -123,9 +126,12 @@ class PrefixCache:
         key = tuple(token_ids)
 
         if final_hash in self._cache:
-            # Update metadata only
-            self._cache[final_hash].reuse_count += 1
-            self._cache[final_hash].last_access_step = self._step
+            # Update metadata only; upgrade kv_tensors if we now have them
+            entry = self._cache[final_hash]
+            entry.reuse_count += 1
+            entry.last_access_step = self._step
+            if kv_tensors is not None and entry.kv_tensors is None:
+                entry.kv_tensors = kv_tensors
             return
 
         # Evict if at capacity
@@ -135,6 +141,7 @@ class PrefixCache:
         entry = PrefixEntry(
             token_ids=list(token_ids),
             block_ids=list(block_ids),
+            kv_tensors=kv_tensors,
             reuse_count=1,
             last_access_step=self._step,
         )
@@ -143,19 +150,20 @@ class PrefixCache:
 
     def find_longest_prefix(
         self, token_ids: List[int]
-    ) -> Tuple[int, List[int]]:
+    ) -> Tuple[int, List[int], Optional[list]]:
         """Find the longest cached prefix of token_ids.
 
-        Returns (matched_token_count, block_ids_for_matched_prefix).
+        Returns (matched_token_count, block_ids, kv_tensors).
         matched_token_count is a multiple of block_size.
-        Returns (0, []) on complete miss.
+        kv_tensors is the stored per-layer (k, v) list, or None if not available.
+        Returns (0, [], None) on complete miss.
         """
         self._step += 1
 
         hashes = self._block_hashes(token_ids)
         if not hashes:
             self.stats.misses += 1
-            return 0, []
+            return 0, [], None
 
         # Walk backwards from longest to shortest to find best match
         for i in range(len(hashes) - 1, -1, -1):
@@ -169,10 +177,10 @@ class PrefixCache:
                     entry.last_access_step = self._step
                     self.stats.hits += 1
                     self.stats.tokens_saved += matched_tokens
-                    return matched_tokens, list(entry.block_ids)
+                    return matched_tokens, list(entry.block_ids), entry.kv_tensors
 
         self.stats.misses += 1
-        return 0, []
+        return 0, [], None
 
     def _evict_lfu(self, n: int) -> None:
         """Evict n entries with the lowest reuse_count (LFU policy)."""

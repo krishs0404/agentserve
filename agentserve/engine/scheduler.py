@@ -18,6 +18,8 @@ Three agent-aware policies (all disabled in baseline_mode=True):
     Requests are sorted by difficulty (easy=0 < medium=1 < hard=2).
     Easy requests move to the front of the pending queue regardless of
     arrival order.  Within the same difficulty level, FIFO is preserved.
+    Implementation: three separate FIFO deques, one per priority level.
+    add() is O(1); dequeue is O(1) (check easy → medium → hard).
 
   Policy 2 — Soft batch overflow for easy requests
     When the decode batch is at max_batch_size and a new easy request
@@ -37,7 +39,7 @@ Three agent-aware policies (all disabled in baseline_mode=True):
 
 from __future__ import annotations
 from collections import deque
-from typing import List, Tuple
+from typing import List, Optional
 
 from agentserve.engine.request import Request, RequestStatus
 
@@ -51,6 +53,9 @@ class Scheduler:
         overflow_factor: float = 1.25,
         preempt_after_tokens: int = 10,
         baseline_mode: bool = False,
+        enable_priority: bool = True,
+        enable_overflow: bool = True,
+        enable_preemption: bool = True,
     ):
         """
         Args:
@@ -61,59 +66,100 @@ class Scheduler:
                                    output tokens generated.
             baseline_mode:         If True, disable all three policies and use
                                    plain FIFO scheduling (for benchmarking).
+            enable_priority:       Enable Policy 1 (priority ordering).
+            enable_overflow:       Enable Policy 2 (soft overflow for easy requests).
+            enable_preemption:     Enable Policy 3 (preempt young hard requests).
         """
         self.max_batch_size = max_batch_size
         self.max_prefill_per_step = max_prefill_per_step
         self.overflow_factor = overflow_factor
         self.preempt_after_tokens = preempt_after_tokens
         self.baseline_mode = baseline_mode
+        # Granular policy toggles for ablation studies
+        self.enable_priority   = enable_priority   and not baseline_mode
+        self.enable_overflow   = enable_overflow   and not baseline_mode
+        self.enable_preemption = enable_preemption and not baseline_mode
 
         self.soft_cap = int(max_batch_size * overflow_factor)
 
-        # Queues
-        self.pending: deque[Request] = deque()   # waiting to be prefilled
-        self.decoding: List[Request] = []         # generating tokens
-        self.completed: List[Request] = []        # done this epoch
+        # Three O(1) FIFO queues for agent-aware mode, one per priority level
+        self._pending_easy:   deque[Request] = deque()
+        self._pending_medium: deque[Request] = deque()
+        self._pending_hard:   deque[Request] = deque()
+        self._priority_queues = {
+            0: self._pending_easy,
+            1: self._pending_medium,
+            2: self._pending_hard,
+        }
+
+        # Single FIFO for baseline mode (strict arrival order across all priorities)
+        self._pending_baseline: deque[Request] = deque()
+
+        self.decoding: List[Request] = []
+        self.completed: List[Request] = []
+
+    # ------------------------------------------------------------------
+    # Backward-compatible pending property (used by tests and introspection)
+    # ------------------------------------------------------------------
+
+    @property
+    def pending(self) -> deque:
+        """Combined view of all pending requests in priority order."""
+        if self.baseline_mode or not self.enable_priority:
+            return deque(self._pending_baseline)
+        combined = deque()
+        for q in (self._pending_easy, self._pending_medium, self._pending_hard):
+            combined.extend(q)
+        return combined
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
     def add(self, request: Request) -> None:
-        """Add a new request to the pending queue."""
+        """Add a new request to the pending queue. O(1)."""
         request.status = RequestStatus.PENDING
-        if self.baseline_mode:
-            self.pending.append(request)
+        if self.baseline_mode or not self.enable_priority:
+            self._pending_baseline.append(request)
         else:
-            self._insert_priority(request)
+            self._priority_queues[request.priority].append(request)
 
     def is_finished(self) -> bool:
-        return not self.pending and not self.decoding
+        if self.baseline_mode or not self.enable_priority:
+            return not self._pending_baseline and not self.decoding
+        return (
+            not self._pending_easy
+            and not self._pending_medium
+            and not self._pending_hard
+            and not self.decoding
+        )
 
     def get_prefill_batch(self) -> List[Request]:
         """Return up to max_prefill_per_step requests to prefill this step.
 
         Also applies Policy 2 (overflow) and Policy 3 (preemption).
         """
-        if not self.pending:
+        if self._next_pending_candidate() is None:
             return []
 
         # Policy 3: check whether we should preempt a young hard request
-        if not self.baseline_mode:
+        if self.enable_preemption:
             self._maybe_preempt()
 
         batch: List[Request] = []
-        while self.pending and len(batch) < self.max_prefill_per_step:
+        while len(batch) < self.max_prefill_per_step:
+            candidate = self._next_pending_candidate()
+            if candidate is None:
+                break
+
             # Policy 2: respect batch capacity (with soft overflow for easy)
             decode_count = len(self.decoding)
-            candidate = self.pending[0]
             is_easy = (candidate.priority == 0)
-
-            cap = self.soft_cap if (not self.baseline_mode and is_easy) else self.max_batch_size
+            cap = self.soft_cap if (self.enable_overflow and is_easy) else self.max_batch_size
             if decode_count + len(batch) >= cap:
                 break  # at capacity (or over soft cap for easy)
 
-            req = self.pending.popleft()
+            req = self._pop_front_pending()
             req.mark_prefill_start()
             batch.append(req)
 
@@ -154,38 +200,36 @@ class Scheduler:
         return done
 
     # ------------------------------------------------------------------
-    # Policy helpers
+    # Internal queue helpers (O(1))
     # ------------------------------------------------------------------
 
-    def _insert_priority(self, request: Request) -> None:
-        """Insert a request into pending, maintaining priority order.
+    def _next_pending_candidate(self) -> Optional[Request]:
+        """Peek at the highest-priority pending request without removing it."""
+        if self.baseline_mode or not self.enable_priority:
+            return self._pending_baseline[0] if self._pending_baseline else None
+        for q in (self._pending_easy, self._pending_medium, self._pending_hard):
+            if q:
+                return q[0]
+        return None
 
-        Priority 0 (easy) goes before priority 1 (medium) before priority 2 (hard).
-        Within same priority, FIFO is preserved (insert at the last position with
-        the same or higher priority).
-        """
-        p = request.priority
-        # Find insertion point: after all existing entries with priority <= p
-        # so that within same priority we keep arrival order.
-        insert_at = len(self.pending)
-        for i in range(len(self.pending) - 1, -1, -1):
-            if self.pending[i].priority <= p:
-                insert_at = i + 1
-                break
-            else:
-                insert_at = i
+    def _pop_front_pending(self) -> Request:
+        """Remove and return the highest-priority pending request."""
+        if self.baseline_mode or not self.enable_priority:
+            return self._pending_baseline.popleft()
+        for q in (self._pending_easy, self._pending_medium, self._pending_hard):
+            if q:
+                return q.popleft()
+        raise RuntimeError("pop_front_pending called on empty pending queue")
 
-        lst = list(self.pending)
-        lst.insert(insert_at, request)
-        self.pending = deque(lst)
+    # ------------------------------------------------------------------
+    # Policy helpers
+    # ------------------------------------------------------------------
 
     def _maybe_preempt(self) -> None:
         """Policy 3: if the front of pending is easy and all decode slots are
         occupied by hard requests, preempt the youngest hard request."""
-        if not self.pending:
-            return
-        if self.pending[0].priority != 0:  # front is not easy
-            return
+        if not self._pending_easy:
+            return  # no easy requests waiting
         if len(self.decoding) < self.max_batch_size:
             return  # room available, no preemption needed
 
@@ -197,12 +241,11 @@ class Scheduler:
         if not hard_candidates:
             return  # no preemptable hard requests
 
-        # Youngest = fewest output tokens
         youngest = min(hard_candidates, key=lambda r: r.num_output_tokens)
         self._preempt(youngest)
 
     def _preempt(self, request: Request) -> None:
-        """Return a decode-phase request to the front of pending."""
+        """Return a decode-phase request to the front of its priority bucket."""
         self.decoding.remove(request)
         request.status = RequestStatus.PENDING
         # Discard generated tokens so far and re-prefill from scratch
@@ -210,8 +253,8 @@ class Scheduler:
         request.kv_cache = None
         request.num_cached_tokens = 0
         request.first_token_time = 0.0
-        # Insert at the front of its priority bucket (re-runs soon)
-        self._insert_priority(request)
+        # Re-insert at the front of its priority queue so it runs soon
+        self._priority_queues[request.priority].appendleft(request)
 
     # ------------------------------------------------------------------
     # Introspection for tests and benchmarks
