@@ -398,7 +398,10 @@ class LlamaModel(nn.Module):
             new_kv_cache:  list of (k, v) tensors per layer, updated with new tokens.
         """
         if not isinstance(token_ids, torch.Tensor):
-            token_ids = torch.tensor(token_ids, dtype=torch.long)
+            token_ids = torch.tensor(token_ids, dtype=torch.long,
+                                     device=self.embed.weight.device)
+        else:
+            token_ids = token_ids.to(self.embed.weight.device)
 
         T = token_ids.shape[0]  # number of tokens this step
 
