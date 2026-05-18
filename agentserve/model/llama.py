@@ -175,14 +175,15 @@ class LlamaAttention(nn.Module):
         # In decode: T=1 so the mask is trivially all-attend (single query)
         if T > 1:
             # [T, T_total] causal mask (T_total >= T when there's a cached prefix)
-            mask = torch.full((T, T_total), float("-inf"), device=x.device)
-            # Allow attending to cached positions and current causal positions
+            # Use scores.dtype to avoid upcasting fp16 scores to float32
+            mask = torch.full((T, T_total), float("-inf"), device=x.device, dtype=scores.dtype)
             offset = T_total - T
-            mask[:, :offset] = 0.0  # can attend to all cached prefix tokens
-            mask = mask + torch.triu(torch.full((T, T), float("-inf"), device=x.device), diagonal=1)
-            scores = scores + mask.unsqueeze(0)  # broadcast over heads
+            mask[:, :offset] = 0.0
+            mask = mask + torch.triu(torch.full((T, T), float("-inf"), device=x.device, dtype=scores.dtype), diagonal=1)
+            scores = scores + mask.unsqueeze(0)
 
-        attn = F.softmax(scores, dim=-1)           # [H, T, T_total]
+        # Compute softmax in float32 for numerical stability, cast back to working dtype
+        attn = F.softmax(scores.float(), dim=-1).to(scores.dtype)  # [H, T, T_total]
         out = torch.bmm(attn, v)                   # [H, T, D]
         out = out.transpose(0, 1).reshape(T, -1)   # [T, H*D]
 
