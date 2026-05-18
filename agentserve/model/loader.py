@@ -84,6 +84,11 @@ def load_weights(model: LlamaModel, model_dir: str) -> None:
                 param_dict[our_name].data.copy_(tensor)
                 loaded.add(our_name)
 
+    # Llama 3.2 ties lm_head to embed_tokens — no separate tensor in the file.
+    if "lm_head.weight" not in loaded and "lm_head.weight" in param_dict and "embed.weight" in param_dict:
+        param_dict["lm_head.weight"].data.copy_(param_dict["embed.weight"].data)
+        loaded.add("lm_head.weight")
+
     missing = set(param_dict.keys()) - loaded
     if missing:
         raise RuntimeError(f"Failed to load weights for parameters: {sorted(missing)}")
