@@ -44,6 +44,8 @@ def sample(
         logits = logits.unsqueeze(0)  # [1, vocab]
 
     logits = logits.float()  # work in fp32 for numerical stability
+    # fp16 lm_head can produce Inf; replace before softmax so we don't get NaN
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
 
     # Temperature scaling
     if temperature > 0 and temperature != 1.0:
@@ -61,6 +63,7 @@ def sample(
         logits = logits.masked_fill(logits < kth_vals, float("-inf"))
 
     probs = F.softmax(logits, dim=-1)  # [batch, vocab]
+    probs = probs.clamp(min=0.0)       # guard against fp rounding giving tiny negatives
 
     # Top-p nucleus: remove tokens whose cumulative probability exceeds p
     if top_p < 1.0:
