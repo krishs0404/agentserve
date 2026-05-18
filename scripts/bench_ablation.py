@@ -207,6 +207,11 @@ def run_vllm(model_dir: str, requests: list[Request], max_tokens: int) -> dict |
         print("  vLLM not installed — skipping. Install with: pip install vllm")
         return None
 
+    import os
+    # vLLM 0.21.0 tries to warm up DeepGEMM FP8 kernels unconditionally on H100,
+    # even for float16 models. Disable it so the benchmark doesn't require deep_gemm.
+    os.environ.setdefault("VLLM_USE_DEEP_GEMM", "0")
+
     llm = LLM(model=model_dir, dtype="float16", gpu_memory_utilization=0.80)
     params = SamplingParams(max_tokens=max_tokens, temperature=1.0)
     prompts = [r.prompt for r in requests]
