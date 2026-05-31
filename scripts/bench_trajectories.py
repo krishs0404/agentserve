@@ -71,15 +71,15 @@ DEADLINE_SLACK = 3.0     # deadline = slack × serial_completion_estimate
 
 # ── Engine factory ───────────────────────────────────────────────────────────
 
-def make_engine(policy=None, model_dir=None, estimated_tps=50.0) -> Engine:
+def make_engine(policy=None, model_dir=None, estimated_tps=50.0, max_batch_size=4) -> Engine:
     use_mock = model_dir is None
     config = Llama32_1B if model_dir is not None else TinyConfig
     return Engine(
         config=config,
         use_mock=use_mock,
         agent_aware=True,
-        max_batch_size=8,
-        max_prefill_per_step=4,
+        max_batch_size=max_batch_size,
+        max_prefill_per_step=min(4, max_batch_size),
         scheduler_policy=policy,
         model_dir=model_dir,
     )
@@ -92,13 +92,15 @@ def run_trajectory_workload(
     policy=None,
     model_dir=None,
     estimated_tps=50.0,
+    max_batch_size=4,
 ) -> dict[str, dict]:
     """Run all trajectories with sequential step dependencies.
 
     Returns:
         dict trajectory_id -> {"tct": float, "template": str, "missed": bool}
     """
-    engine = make_engine(policy, model_dir=model_dir, estimated_tps=estimated_tps)
+    engine = make_engine(policy, model_dir=model_dir, estimated_tps=estimated_tps,
+                         max_batch_size=max_batch_size)
 
     # Build a lookup: trajectory_id -> TrajectorySpec (for step continuation)
     spec_map = {s.trajectory_id: s for s in specs}
@@ -255,6 +257,8 @@ def main():
     parser.add_argument("--model-dir", default=None, help="Path to real model weights (omit for mock)")
     parser.add_argument("--estimated-tps", type=float, default=500.0,
                         help="Tokens/sec estimate for deadline slack (real model ~500, mock ~50)")
+    parser.add_argument("--max-batch", type=int, default=4,
+                        help="Max decode batch size per engine step (lower = less VRAM)")
     args = parser.parse_args()
 
     # Rebuild deadline policy with the right TPS estimate
@@ -289,8 +293,18 @@ def main():
             all_specs, policy=policy_obj,
             model_dir=args.model_dir,
             estimated_tps=args.estimated_tps,
+            max_batch_size=args.max_batch,
         )
         elapsed = time.monotonic() - t0
+
+        # Release CUDA memory between policy runs to avoid OOM from accumulation
+        if args.model_dir is not None:
+            try:
+                import gc, torch
+                gc.collect()
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         stats = compute_stats(results)
         all_stats[policy_name] = stats

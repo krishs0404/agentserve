@@ -91,27 +91,35 @@ class RequestDifficultyClassifier:
     """Classifies a prompt string into EASY / MEDIUM / HARD."""
 
     def classify(self, prompt: str) -> Difficulty:
-        p = prompt.lower()
+        # Detect multi-turn conversations by the presence of assistant or tool
+        # role markers. In multi-turn mode the prompt is a growing context dump
+        # (system prompt + prior turns + tool results) where accumulated length
+        # tells us nothing about the CURRENT response difficulty — a 20K-token
+        # conversation context can still produce a 30-token tool call next.
+        is_multi_turn = "<assistant>" in prompt or "<tool>" in prompt
 
-        # Estimate prompt token length from word count (cheap heuristic)
-        approx_tokens = int(len(prompt.split()) / _WORDS_PER_TOKEN)
+        # Classify on the tail of the prompt: this is always where the current
+        # instruction lives, regardless of how long the conversation history is.
+        classify_window = prompt[-800:] if len(prompt) > 800 else prompt
+        p = classify_window.lower()
 
-        # Hard: explicit code-gen / long planning keywords OR very long prompt
-        if approx_tokens > _HARD_PROMPT_TOKEN_THRESHOLD:
-            return Difficulty(DifficultyLevel.HARD, estimated_output_tokens=256, priority=2)
+        # Length threshold only applies to true single-turn prompts. For multi-turn
+        # conversations, skip it — prompt length is anti-correlated with output
+        # difficulty (later turns have longer contexts but often shorter responses).
+        if not is_multi_turn:
+            full_tokens = int(len(prompt.split()) / _WORDS_PER_TOKEN)
+            if full_tokens > _HARD_PROMPT_TOKEN_THRESHOLD:
+                return Difficulty(DifficultyLevel.HARD, estimated_output_tokens=256, priority=2)
+
         for kw in _HARD_KEYWORDS:
             if kw in p:
                 return Difficulty(DifficultyLevel.HARD, estimated_output_tokens=256, priority=2)
 
-        # Easy: narrow-output keywords
         for kw in _EASY_KEYWORDS:
             if kw in p:
                 return Difficulty(DifficultyLevel.EASY, estimated_output_tokens=20, priority=0)
 
-        # Easy: very short prompt (< 4 words) — terse input almost certainly expects a terse answer.
-        # Use word count to avoid misclassifying short-but-substantive prompts.
-        if len(prompt.split()) < 4:
+        if len(classify_window.split()) < 4:
             return Difficulty(DifficultyLevel.EASY, estimated_output_tokens=20, priority=0)
 
-        # Default: medium
         return Difficulty(DifficultyLevel.MEDIUM, estimated_output_tokens=100, priority=1)
