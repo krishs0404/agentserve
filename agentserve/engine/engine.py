@@ -95,6 +95,7 @@ class Engine:
         enable_overflow: bool = True,
         enable_preemption: bool = True,
         scheduler_policy: Optional[SchedulerPolicy] = None,
+        use_relative_batching: bool = False,
     ):
         self.config = config
         self.eos_token_id = eos_token_id
@@ -128,7 +129,14 @@ class Engine:
             enable_overflow=enable_overflow,
             enable_preemption=enable_preemption,
             policy=scheduler_policy,
+            use_relative_batching=use_relative_batching,
         )
+
+        # Online output-length predictor (used when use_relative_batching=True,
+        # updates after every completion regardless of mode)
+        from agentserve.engine.length_predictor import OutputLengthPredictor
+        self.predictor = OutputLengthPredictor()
+        self.use_relative_batching = use_relative_batching
 
         # KV-cache block allocator
         self.allocator = BlockAllocator(
@@ -215,6 +223,9 @@ class Engine:
                 self.metrics.difficulty_counts.get(req.difficulty, 0) + 1
             )
             self.completed_requests.append(req)
+            # Online predictor update: teach the model what this prompt actually produced
+            if req.num_output_tokens > 0:
+                self.predictor.update(req.prompt, req.num_output_tokens)
 
         return completed_this_step
 
@@ -227,11 +238,16 @@ class Engine:
         while self._incoming:
             req = self._incoming.popleft()
 
-            # Classify difficulty and set priority
+            # Classify difficulty and set priority.
+            # In relative-batching mode, override the bucketed estimate with the
+            # predictor's continuous ŷ — the scheduler uses this for variance minimization.
             diff = self.classifier.classify(req.prompt)
             req.difficulty = diff.level.value
             req.priority = diff.priority
-            req.estimated_output_tokens = diff.estimated_output_tokens
+            if self.use_relative_batching:
+                req.estimated_output_tokens = int(self.predictor.predict(req.prompt))
+            else:
+                req.estimated_output_tokens = diff.estimated_output_tokens
 
             # Check prefix cache — on hit, seed req.kv_cache so prefill skips those tokens
             matched_len, _, cached_kv = self.prefix_cache.find_longest_prefix(req.token_ids)

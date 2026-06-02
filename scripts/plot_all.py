@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-Generate all AgentServe benchmark plots.
+Generate the four plots that tell the AgentServe story.
+
+  1. ablation_latency.png   — easy vs hard latency across all 5 scheduling modes
+                              (the headline result: what does agent-aware scheduling buy you?)
+  2. trajectory_speedup.png — TCT speedup over FIFO per policy × template
+                              (trajectory-aware policies: 6× for react, 2.6× for plan-execute)
+  3. sensitivity_sweep.png  — scheduling benefit vs classifier noise
+                              (robustness: still +65% benefit at 50% random labelling)
+  4. latency_cdf.png        — easy-request latency CDF across all modes
+                              (shows distribution shift, not just mean)
 
 Usage:
     uv run python scripts/plot_all.py
-
-Outputs to notes/plots/:
-    ablation_easy_hard.png      — easy vs hard latency by scheduling mode
-    ablation_latency_cdf.png    — per-difficulty latency CDFs
-    ablation_ttft.png           — mean TTFT by mode
-    ablation_throughput.png     — throughput by mode
-    trajectory_p50_tct.png      — P50 TCT heatmap: policy × template
-    trajectory_speedup.png      — speedup over FIFO per policy × template
-    sensitivity_sweep.png       — scheduling benefit vs classifier noise
-    prefix_cache.png            — prefix hit rate: synthetic vs real traces
+    uv run python scripts/plot_all.py --ablation notes/results_latest.json
 """
 
 from __future__ import annotations
+import argparse
 import json
 from pathlib import Path
 
@@ -26,27 +27,25 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 plt.rcParams.update({
-    "font.family": "sans-serif",
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.grid": True,
-    "grid.alpha": 0.25,
-    "figure.dpi": 150,
+    "font.family":        "sans-serif",
+    "axes.spines.top":    False,
+    "axes.spines.right":  False,
+    "axes.grid":          True,
+    "grid.alpha":         0.22,
+    "figure.dpi":         150,
 })
 
 ROOT   = Path(__file__).parent.parent
 OUTDIR = ROOT / "notes" / "plots"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
-ABLATION_JSON    = ROOT / "notes" / "results_20260531_151633.json"
-TRAJECTORY_JSON  = ROOT / "notes" / "results_20260531_154047.json"
-SENSITIVITY_JSON = ROOT / "agentserve" / "engine" / "sensitivity_sweep.json"
-
+# Consistent colours so every plot tells the same visual story
 MODE_COLORS = {
-    "(a) Baseline FIFO":      "#e74c3c",
-    "(b) Priority only":       "#f39c12",
-    "(c) Priority + Overflow": "#27ae60",
-    "(d) All 3 Policies":      "#2980b9",
+    "(a) Baseline FIFO":      "#c0392b",
+    "(b) Priority only":      "#e67e22",
+    "(c) Priority + Overflow":"#27ae60",
+    "(d) All 3 Policies":     "#2980b9",
+    "(e) Relative Batching":  "#8e44ad",
 }
 POLICY_COLORS = {
     "fifo":          "#8c8c8c",
@@ -54,267 +53,228 @@ POLICY_COLORS = {
     "traj_progress": "#dd8452",
     "traj_deadline": "#55a868",
 }
-TEMPLATES = ["react", "plan_execute", "reflect", "chat"]
-TEMPLATE_LABELS = ["ReAct\n(3-step)", "Plan-Execute\n(4-step)", "Reflect\n(3-step)", "Chat\n(4-step)"]
+TEMPLATES       = ["react",      "plan_execute",    "reflect",    "chat"]
+TEMPLATE_LABELS = ["ReAct\n(3-step)", "Plan-Execute\n(4-step)",
+                   "Reflect\n(3-step)", "Chat\n(4-step)"]
 
 
-def save(fig, name: str) -> None:
+def _save(fig, name: str) -> None:
     path = OUTDIR / name
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  saved {path.relative_to(ROOT)}")
+    print(f"  {path.relative_to(ROOT)}")
 
 
-# ── Ablation plots ─────────────────────────────────────────────────────────────
+# ── Plot 1: Easy vs Hard latency — the headline ablation ──────────────────────
 
-def ablation_plots() -> None:
-    data = json.loads(ABLATION_JSON.read_text())
-    modes = [m for m in data["ablation"] if isinstance(m, dict) and "label" in m]
+def plot_ablation_latency(ablation_path: Path) -> None:
+    data  = json.loads(ablation_path.read_text())
+    modes = [m for m in data.get("ablation", data if isinstance(data, list) else [])
+             if isinstance(m, dict) and "label" in m
+             and m.get("easy_mean_lat_s", 0) > 0]
+    if not modes:
+        print("  [skip] no valid ablation modes found")
+        return
 
     labels = [m["label"] for m in modes]
-    colors = [MODE_COLORS.get(lbl, "#95a5a6") for lbl in labels]
-    easy   = [m.get("easy_mean_lat_s",  0) for m in modes]
-    hard   = [m.get("hard_mean_lat_s",  0) for m in modes]
-    ttft   = [m.get("mean_ttft_s",      0) for m in modes]
-    tps    = [m.get("throughput_tps",   0) for m in modes]
+    easy   = [m["easy_mean_lat_s"] for m in modes]
+    hard   = [m["hard_mean_lat_s"] for m in modes]
+    x, w   = np.arange(len(labels)), 0.32
 
-    # 1 — Easy vs Hard latency grouped bars
-    fig, ax = plt.subplots(figsize=(11, 5))
-    x, w = np.arange(len(labels)), 0.32
-    b1 = ax.bar(x - w/2, easy, w, label="Easy requests",  color="#27ae60", alpha=0.88, edgecolor="white")
-    b2 = ax.bar(x + w/2, hard, w, label="Hard requests",  color="#e74c3c", alpha=0.88, edgecolor="white")
+    fig, ax = plt.subplots(figsize=(12, 5.5))
+    b1 = ax.bar(x - w/2, easy, w, label="Easy requests",
+                color="#27ae60", alpha=0.88, edgecolor="white")
+    b2 = ax.bar(x + w/2, hard, w, label="Hard requests",
+                color="#c0392b", alpha=0.88, edgecolor="white")
+
     for bar in (*b1, *b2):
         h = bar.get_height()
-        if h > 0.01:
-            ax.text(bar.get_x() + bar.get_width()/2, h + 0.05,
+        if h > 0.05:
+            ax.text(bar.get_x() + bar.get_width()/2, h + 0.06,
                     f"{h:.2f}s", ha="center", va="bottom", fontsize=8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
-    ax.set_ylabel("Mean Request Latency (s)", fontsize=11)
-    ax.set_title("Easy vs Hard Request Latency by Scheduling Mode\n"
-                 "(A10G GPU · Llama 3.2-1B · 100 requests)", fontsize=12, fontweight="bold")
-    ax.legend(fontsize=10)
-    # Annotate the key improvement
+
+    # Annotate best easy-latency improvement
     baseline_easy = easy[0]
-    best_easy = min(easy)
-    pct = (1 - best_easy / baseline_easy) * 100
-    ax.annotate(f"−{pct:.0f}% easy latency",
-                xy=(labels.index(min(modes, key=lambda m: m.get("easy_mean_lat_s", 999))["label"]) - w/2,
-                    best_easy),
-                xytext=(2.5, best_easy + 2),
-                arrowprops=dict(arrowstyle="->", color="#27ae60", lw=1.5),
-                fontsize=9, color="#27ae60", fontweight="bold")
+    best_idx  = int(np.argmin(easy))
+    best_easy = easy[best_idx]
+    if baseline_easy > 0:
+        pct = (1 - best_easy / baseline_easy) * 100
+        ax.annotate(
+            f"−{pct:.0f}% easy latency",
+            xy=(best_idx - w/2, best_easy),
+            xytext=(best_idx - w/2 + 0.5, best_easy + 1.8),
+            arrowprops=dict(arrowstyle="->", color="#27ae60", lw=1.5),
+            fontsize=9, color="#27ae60", fontweight="bold",
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=12, ha="right", fontsize=9)
+    ax.set_ylabel("Mean Request Latency (s)", fontsize=11)
+    ax.set_title(
+        "Request Latency by Scheduling Mode\n"
+        "A10G GPU · Llama 3.2-1B · 100 heterogeneous agent requests",
+        fontsize=12, fontweight="bold",
+    )
+    ax.legend(fontsize=10)
     plt.tight_layout()
-    save(fig, "ablation_easy_hard.png")
-
-    # 2 — Latency CDFs (easy + hard side by side)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    for ax, (key, title) in zip(axes, [
-        ("easy_latencies",  "Easy Request Latency CDF"),
-        ("hard_latencies",  "Hard Request Latency CDF"),
-    ]):
-        for m in modes:
-            lats = m.get(key, [])
-            if not lats: continue
-            xs = sorted(lats)
-            ys = [(i+1)/len(xs) for i in range(len(xs))]
-            ax.plot(xs, ys, label=m["label"], color=MODE_COLORS.get(m["label"], "#95a5a6"),
-                    linewidth=2.2, alpha=0.9)
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.set_xlabel("Latency (s)", fontsize=10)
-        ax.set_ylabel("CDF", fontsize=10)
-        ax.set_ylim(0, 1.05)
-        ax.legend(fontsize=7.5, loc="lower right")
-    fig.suptitle("Latency CDFs: Agent-Aware Scheduling vs FIFO Baseline",
-                 fontsize=12, fontweight="bold", y=1.02)
-    plt.tight_layout()
-    save(fig, "ablation_latency_cdf.png")
-
-    # 3 — TTFT bar
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    bars = ax.bar(range(len(labels)), ttft, color=colors, alpha=0.88, edgecolor="white", width=0.55)
-    for bar, val in zip(bars, ttft):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                f"{val:.3f}s", ha="center", va="bottom", fontsize=9)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
-    ax.set_ylabel("Mean Time-to-First-Token (s)", fontsize=11)
-    ax.set_title("Mean TTFT by Scheduling Mode  (lower is better)",
-                 fontsize=12, fontweight="bold")
-    plt.tight_layout()
-    save(fig, "ablation_ttft.png")
-
-    # 4 — Throughput bar
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    bars = ax.bar(range(len(labels)), tps, color=colors, alpha=0.88, edgecolor="white", width=0.55)
-    for bar, val in zip(bars, tps):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                f"{val:.0f}", ha="center", va="bottom", fontsize=9)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=15, ha="right", fontsize=9)
-    ax.set_ylabel("Throughput (tokens / s)", fontsize=11)
-    ax.set_title("Throughput by Scheduling Mode", fontsize=12, fontweight="bold")
-    plt.tight_layout()
-    save(fig, "ablation_throughput.png")
-
-    print(f"  Ablation: easy −{pct:.0f}%, tps +{(tps[-1]/tps[0]-1)*100:.0f}%")
+    _save(fig, "ablation_latency.png")
+    print(f"    → easy −{pct:.0f}%  |  modes: {', '.join(labels)}")
 
 
-# ── Trajectory plots ───────────────────────────────────────────────────────────
+# ── Plot 2: Trajectory speedup — the trajectory scheduling story ───────────────
 
-def trajectory_plots() -> None:
-    data = json.loads(TRAJECTORY_JSON.read_text())
-    stats = data["trajectories"]["stats"]
+def plot_trajectory_speedup(trajectory_path: Path) -> None:
+    data   = json.loads(trajectory_path.read_text())
+    stats  = data.get("trajectories", {}).get("stats", data.get("stats", {}))
+    if not stats:
+        print("  [skip] no trajectory stats found")
+        return
 
-    policies = ["fifo", "priority", "traj_progress", "traj_deadline"]
-    policy_labels = ["FIFO", "Priority", "Traj-Progress", "Traj-Deadline"]
-
-    # 5 — P50 TCT grouped bar chart
-    x = np.arange(len(TEMPLATES))
+    policies       = ["priority", "traj_progress", "traj_deadline"]
+    policy_labels  = ["Priority", "Traj-Progress", "Traj-Deadline"]
     n = len(policies)
-    w = 0.18
+    x = np.arange(len(TEMPLATES))
+    w = 0.22
     offsets = np.linspace(-(n-1)/2, (n-1)/2, n) * w
 
     fig, ax = plt.subplots(figsize=(12, 5.5))
+
     for i, (policy, plabel) in enumerate(zip(policies, policy_labels)):
-        p50s = [stats.get(policy, {}).get(tmpl, {}).get("p50", 0) for tmpl in TEMPLATES]
-        bars = ax.bar(x + offsets[i], p50s, w, label=plabel,
-                      color=POLICY_COLORS.get(policy, "#ccc"),
-                      alpha=0.88, edgecolor="white")
-        for bar, val in zip(bars, p50s):
-            if val > 0:
-                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                        f"{val:.0f}s", ha="center", va="bottom", fontsize=6.5)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(TEMPLATE_LABELS, fontsize=10)
-    ax.set_ylabel("P50 Trajectory Completion Time (s)", fontsize=11)
-    ax.set_title("Trajectory Completion Time by Scheduling Policy × Template\n"
-                 "(A10G GPU · Llama 3.2-1B · 20 trajectories per template)",
-                 fontsize=12, fontweight="bold")
-    ax.legend(title="Policy", fontsize=9, title_fontsize=9)
-    ax.set_ylim(bottom=0)
-    plt.tight_layout()
-    save(fig, "trajectory_p50_tct.png")
-
-    # 6 — Speedup over FIFO heatmap-style bar
-    fig, ax = plt.subplots(figsize=(12, 5))
-    for i, (policy, plabel) in enumerate(zip(policies[1:], policy_labels[1:]), 1):
         speedups = []
         for tmpl in TEMPLATES:
-            fifo_p50 = stats.get("fifo", {}).get(tmpl, {}).get("p50", 1)
-            pol_p50  = stats.get(policy, {}).get(tmpl, {}).get("p50", 1)
+            fifo_p50 = stats.get("fifo",   {}).get(tmpl, {}).get("p50", 0)
+            pol_p50  = stats.get(policy,   {}).get(tmpl, {}).get("p50", 0)
             speedups.append(fifo_p50 / pol_p50 if pol_p50 > 0 else 1.0)
-        bars = ax.bar(x + offsets[i-1], speedups, w, label=plabel,
+
+        bars = ax.bar(x + offsets[i], speedups, w,
+                      label=plabel,
                       color=POLICY_COLORS.get(policy, "#ccc"),
                       alpha=0.88, edgecolor="white")
         for bar, val in zip(bars, speedups):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f"{val:.1f}×", ha="center", va="bottom", fontsize=7.5, fontweight="bold")
+            if val > 1.05:
+                ax.text(bar.get_x() + bar.get_width()/2,
+                        bar.get_height() + 0.03,
+                        f"{val:.1f}×",
+                        ha="center", va="bottom", fontsize=8.5, fontweight="bold")
 
-    ax.axhline(1.0, color="#e74c3c", linewidth=1.5, linestyle="--", label="FIFO baseline (1×)")
+    ax.axhline(1.0, color="#c0392b", linewidth=1.8, linestyle="--",
+               label="FIFO baseline (1×)", zorder=2)
     ax.set_xticks(x)
     ax.set_xticklabels(TEMPLATE_LABELS, fontsize=10)
-    ax.set_ylabel("Speedup over FIFO (×)", fontsize=11)
-    ax.set_title("TCT Speedup over FIFO by Policy × Trajectory Template",
-                 fontsize=12, fontweight="bold")
-    ax.legend(title="Policy", fontsize=9, title_fontsize=9)
+    ax.set_ylabel("TCT Speedup over FIFO (×)", fontsize=11)
+    ax.set_title(
+        "Trajectory Completion Time Speedup over FIFO\n"
+        "A10G GPU · Llama 3.2-1B · 20 trajectories per template",
+        fontsize=12, fontweight="bold",
+    )
+    ax.legend(fontsize=9, title="Policy", title_fontsize=9)
     ax.set_ylim(bottom=0)
     plt.tight_layout()
-    save(fig, "trajectory_speedup.png")
+    _save(fig, "trajectory_speedup.png")
 
-    # Print headline
-    react_fifo = stats.get("fifo", {}).get("react", {}).get("p50", 0)
-    react_tp   = stats.get("traj_progress", {}).get("react", {}).get("p50", 0)
-    react_td   = stats.get("traj_deadline", {}).get("plan_execute", {}).get("p50", 0)
-    fifo_pe    = stats.get("fifo", {}).get("plan_execute", {}).get("p50", 0)
-    if react_tp > 0:
-        print(f"  react: {react_fifo:.0f}s → {react_tp:.0f}s  ({react_fifo/react_tp:.1f}× speedup)")
-    if fifo_pe > 0 and react_td > 0:
-        print(f"  plan_execute: {fifo_pe:.0f}s → {react_td:.0f}s  ({fifo_pe/react_td:.1f}× speedup)")
+    react_sp = (stats.get("fifo",{}).get("react",{}).get("p50",0) /
+                max(stats.get("traj_progress",{}).get("react",{}).get("p50",1), 1e-9))
+    pe_sp    = (stats.get("fifo",{}).get("plan_execute",{}).get("p50",0) /
+                max(stats.get("traj_deadline",{}).get("plan_execute",{}).get("p50",1), 1e-9))
+    print(f"    → react {react_sp:.1f}×  plan_execute {pe_sp:.1f}×")
 
 
-# ── Sensitivity sweep ──────────────────────────────────────────────────────────
+# ── Plot 3: Sensitivity sweep — classifier robustness ─────────────────────────
 
-def sensitivity_plot() -> None:
-    if not SENSITIVITY_JSON.exists():
-        print("  sensitivity_sweep.json not found — skipping")
+def plot_sensitivity(sensitivity_path: Path) -> None:
+    if not sensitivity_path.exists():
+        print("  [skip] sensitivity_sweep.json not found")
         return
 
-    data = json.loads(SENSITIVITY_JSON.read_text())
+    data = json.loads(sensitivity_path.read_text())
     sweep = data["sweep"]
-    noise_rates  = [s["noise_rate"] for s in sweep]
-    improvements = [s["easy_improvement_pct"] for s in sweep]
-    baseline_easy = data["baseline_easy_lat"]
+    noise_pct  = [s["noise_rate"] * 100 for s in sweep]
+    benefit    = [s["easy_improvement_pct"] for s in sweep]
 
     fig, ax = plt.subplots(figsize=(9, 4.5))
-    ax.plot([r * 100 for r in noise_rates], improvements,
-            "o-", color="#2980b9", linewidth=2.5, markersize=8, zorder=3)
-    for r, imp in zip(noise_rates, improvements):
-        ax.annotate(f"{imp:.1f}%", (r*100, imp),
-                    textcoords="offset points", xytext=(0, 8),
-                    ha="center", fontsize=9, fontweight="bold", color="#2980b9")
-    ax.axhline(0, color="#e74c3c", linewidth=1.5, linestyle="--", label="FIFO baseline (0%)")
-    ax.fill_between([r*100 for r in noise_rates], improvements, 0,
-                    alpha=0.12, color="#2980b9")
-    ax.set_xlabel("Classifier Noise Rate (%)\n(fraction of labels randomly flipped)", fontsize=10)
-    ax.set_ylabel("Easy-Request Latency Improvement\nvs FIFO Baseline (%)", fontsize=10)
-    ax.set_title("Scheduling Benefit vs Classifier Accuracy\n"
-                 "(Benefit remains >60% even at 50% random classification)",
-                 fontsize=12, fontweight="bold")
+    ax.fill_between(noise_pct, benefit, 0, alpha=0.12, color="#2980b9")
+    ax.plot(noise_pct, benefit, "o-", color="#2980b9",
+            linewidth=2.5, markersize=8, zorder=3)
+    for x, y in zip(noise_pct, benefit):
+        ax.annotate(f"{y:.0f}%", (x, y), textcoords="offset points",
+                    xytext=(0, 9), ha="center", fontsize=9.5,
+                    fontweight="bold", color="#2980b9")
+
+    ax.axhline(0, color="#c0392b", linewidth=1.5, linestyle="--",
+               label="FIFO baseline (0% improvement)")
+    ax.set_xlabel("Classifier Noise Rate (% of labels randomly flipped)", fontsize=10)
+    ax.set_ylabel("Easy-Request Latency\nImprovement vs FIFO (%)", fontsize=10)
+    ax.set_title(
+        "Scheduling Benefit is Robust to Classifier Accuracy\n"
+        "Benefit stays >60% even when half of all labels are random",
+        fontsize=12, fontweight="bold",
+    )
     ax.legend(fontsize=9)
+    ax.set_xlim(-2, max(noise_pct) + 3)
     ax.set_ylim(bottom=0)
-    ax.set_xlim(-2, 55)
     plt.tight_layout()
-    save(fig, "sensitivity_sweep.png")
-    print(f"  noise 0%→{improvements[0]:.1f}%  noise 50%→{improvements[-1]:.1f}%")
+    _save(fig, "sensitivity_sweep.png")
+    print(f"    → {benefit[0]:.0f}% at 0% noise  →  {benefit[-1]:.0f}% at {noise_pct[-1]:.0f}% noise")
 
 
-# ── Prefix cache plot ──────────────────────────────────────────────────────────
+# ── Plot 4: Easy-request latency CDF — shows distribution shift ───────────────
 
-def prefix_cache_plot() -> None:
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+def plot_easy_cdf(ablation_path: Path) -> None:
+    data  = json.loads(ablation_path.read_text())
+    modes = [m for m in data.get("ablation", data if isinstance(data, list) else [])
+             if isinstance(m, dict) and "label" in m and m.get("easy_latencies")]
+    if not modes:
+        print("  [skip] no easy latency data")
+        return
 
-    workloads = ["Synthetic\n(unique prompts)", "Real SWE-bench\n(shared system prompt)"]
-    hit_rates = [0.0, 0.90]
-    colors = ["#e74c3c", "#27ae60"]
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for m in modes:
+        lats = sorted(m["easy_latencies"])
+        if not lats:
+            continue
+        ys = [(i+1)/len(lats) for i in range(len(lats))]
+        color = MODE_COLORS.get(m["label"], "#95a5a6")
+        lw = 2.8 if m["label"] in ("(a) Baseline FIFO", "(e) Relative Batching") else 1.8
+        ax.plot(lats, ys, label=m["label"], color=color, linewidth=lw, alpha=0.92)
 
-    bars = ax.bar(workloads, [r * 100 for r in hit_rates],
-                  color=colors, alpha=0.88, edgecolor="white", width=0.4)
-    for bar, val in zip(bars, hit_rates):
-        ax.text(bar.get_x() + bar.get_width()/2,
-                bar.get_height() + 0.5,
-                f"{val:.0%}", ha="center", va="bottom", fontsize=14, fontweight="bold")
-
-    ax.set_ylabel("Prefix Cache Hit Rate (%)", fontsize=11)
-    ax.set_title("Prefix Cache Hit Rate: Synthetic vs Real Agent Traces\n"
-                 "(50 SWE-bench sessions, 499 requests, shared ~4K-token system prompt)",
-                 fontsize=11, fontweight="bold")
-    ax.set_ylim(0, 105)
-    ax.annotate("669 sessions share the\nsame system prompt →\n90% KV cache reuse",
-                xy=(1, 90), xytext=(1.35, 60),
-                arrowprops=dict(arrowstyle="->", color="#27ae60", lw=1.5),
-                fontsize=9, color="#27ae60")
+    ax.set_xlabel("Request Latency (s)", fontsize=10)
+    ax.set_ylabel("CDF", fontsize=10)
+    ax.set_ylim(0, 1.05)
+    ax.set_title(
+        "Easy-Request Latency CDF by Scheduling Mode\n"
+        "Left = faster. Agent-aware modes shift the entire distribution.",
+        fontsize=12, fontweight="bold",
+    )
+    ax.legend(fontsize=8.5, loc="lower right")
     plt.tight_layout()
-    save(fig, "prefix_cache_hit_rate.png")
-    print("  0% synthetic → 90% real SWE-bench")
+    _save(fig, "latency_cdf.png")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ablation",    default=str(ROOT / "notes/results_20260531_151633.json"))
+    ap.add_argument("--trajectory",  default=str(ROOT / "notes/results_20260531_154047.json"))
+    ap.add_argument("--sensitivity", default=str(ROOT / "agentserve/engine/sensitivity_sweep.json"))
+    args = ap.parse_args()
+
+    print("Generating plots → notes/plots/\n")
+
+    print("1. Ablation latency (easy vs hard, all modes):")
+    plot_ablation_latency(Path(args.ablation))
+
+    print("\n2. Trajectory speedup over FIFO:")
+    plot_trajectory_speedup(Path(args.trajectory))
+
+    print("\n3. Sensitivity sweep:")
+    plot_sensitivity(Path(args.sensitivity))
+
+    print("\n4. Easy-request latency CDF:")
+    plot_easy_cdf(Path(args.ablation))
+
+    print(f"\nDone.")
+
+
 if __name__ == "__main__":
-    print("Generating AgentServe benchmark plots...\n")
-
-    print("Ablation plots:")
-    ablation_plots()
-
-    print("\nTrajectory plots:")
-    trajectory_plots()
-
-    print("\nSensitivity sweep:")
-    sensitivity_plot()
-
-    print("\nPrefix cache:")
-    prefix_cache_plot()
-
-    print(f"\nAll plots saved to {OUTDIR.relative_to(ROOT)}/")
+    main()

@@ -40,6 +40,8 @@ Three agent-aware policies (all disabled in baseline_mode=True):
 from __future__ import annotations
 
 import bisect
+import statistics
+import time
 from collections import deque
 from typing import List, Optional, TYPE_CHECKING
 
@@ -62,6 +64,7 @@ class Scheduler:
         enable_overflow: bool = True,
         enable_preemption: bool = True,
         policy: "Optional[SchedulerPolicy]" = None,
+        use_relative_batching: bool = False,
     ):
         """
         Args:
@@ -87,6 +90,10 @@ class Scheduler:
         self.enable_preemption = enable_preemption and not baseline_mode
 
         self.soft_cap = int(max_batch_size * overflow_factor)
+        self.use_relative_batching = use_relative_batching
+
+        # Flat list for relative-batching mode (sliding window needs random access)
+        self._pending_flat: List[Request] = []
 
         # Pluggable policy (when set, bypasses the three-deque logic entirely)
         self.policy = policy
@@ -117,6 +124,8 @@ class Scheduler:
     @property
     def pending(self) -> deque:
         """Combined view of all pending requests in priority order."""
+        if self.use_relative_batching:
+            return deque(self._pending_flat)
         if self.policy is not None:
             return deque(item[2] for item in self._policy_pending)
         if self.baseline_mode or not self.enable_priority:
@@ -133,6 +142,9 @@ class Scheduler:
     def add(self, request: Request) -> None:
         """Add a new request to the pending queue."""
         request.status = RequestStatus.PENDING
+        if self.use_relative_batching:
+            self._pending_flat.append(request)
+            return
         if self.policy is not None:
             key = self.policy.priority_key(request)
             bisect.insort(self._policy_pending, (key, self._policy_seq, request))
@@ -144,6 +156,8 @@ class Scheduler:
             self._priority_queues[request.priority].append(request)
 
     def is_finished(self) -> bool:
+        if self.use_relative_batching:
+            return not self._pending_flat and not self.decoding
         if self.policy is not None:
             return not self._policy_pending and not self.decoding
         if self.baseline_mode or not self.enable_priority:
@@ -156,10 +170,9 @@ class Scheduler:
         )
 
     def get_prefill_batch(self) -> List[Request]:
-        """Return up to max_prefill_per_step requests to prefill this step.
-
-        Also applies Policy 2 (overflow) and Policy 3 (preemption).
-        """
+        """Return up to max_prefill_per_step requests to prefill this step."""
+        if self.use_relative_batching:
+            return self._get_prefill_batch_relative()
         if self._next_pending_candidate() is None:
             return []
 
@@ -228,6 +241,8 @@ class Scheduler:
 
     def _next_pending_candidate(self) -> Optional[Request]:
         """Peek at the highest-priority pending request without removing it."""
+        if self.use_relative_batching:
+            return self._pending_flat[0] if self._pending_flat else None
         if self.policy is not None:
             return self._policy_pending[0][2] if self._policy_pending else None
         if self.baseline_mode or not self.enable_priority:
@@ -247,6 +262,84 @@ class Scheduler:
             if q:
                 return q.popleft()
         raise RuntimeError("pop_front_pending called on empty pending queue")
+
+    # ------------------------------------------------------------------
+    # Relative-batching helpers
+    # ------------------------------------------------------------------
+
+    def _get_prefill_batch_relative(self) -> List[Request]:
+        """
+        Sliding-window batch selection: pick up to max_prefill_per_step requests
+        whose predicted output lengths form the tightest cluster in the pending queue.
+
+        Why this helps: our decode forward pass pads all KV caches to the longest
+        sequence in the batch. Pairing a 5-token request with a 500-token request
+        wastes 99% of that slot's compute. By grouping similar-length requests we
+        reduce max(seq_lens) within each decode step.
+
+        The age penalty prevents starvation: requests that have waited longest
+        push their window's score down even if the variance is slightly higher.
+        """
+        if not self._pending_flat:
+            return []
+
+        slots = max(0, self.max_batch_size - len(self.decoding))
+        if slots == 0:
+            return []
+
+        n = min(self.max_prefill_per_step, slots, len(self._pending_flat))
+        if n == 0:
+            return []
+
+        # Sort by predicted output length (continuous ŷ from the predictor)
+        sorted_pending = sorted(self._pending_flat,
+                                key=lambda r: r.estimated_output_tokens)
+
+        best_batch: List[Request] = sorted_pending[:n]
+        best_score = float("inf")
+        now = time.monotonic()
+
+        for i in range(len(sorted_pending) - n + 1):
+            window = sorted_pending[i: i + n]
+            lengths = [r.estimated_output_tokens for r in window]
+            variance = statistics.variance(lengths) if len(lengths) > 1 else 0.0
+            # Age penalty: reward windows that contain older (more urgent) requests
+            age_penalty = sum(now - r.arrival_time for r in window)
+            score = variance - 0.15 * age_penalty
+            if score < best_score:
+                best_score = score
+                best_batch = window
+
+        # Remove selected requests from the flat list and mark prefill start
+        selected_ids = {id(r) for r in best_batch}
+        self._pending_flat = [r for r in self._pending_flat
+                              if id(r) not in selected_ids]
+        for req in best_batch:
+            req.mark_prefill_start()
+
+        return best_batch
+
+    def _preempt_relative(self) -> None:
+        """
+        Continuous preemption: among young decoding requests, preempt the one
+        most dissimilar from the current batch's median predicted output length.
+        More principled than the keyword-based 'youngest hard request' heuristic.
+        """
+        if not self._pending_flat or not self.decoding:
+            return
+        if len(self.decoding) < self.max_batch_size:
+            return
+
+        median_len = statistics.median(r.estimated_output_tokens for r in self.decoding)
+        candidates = [r for r in self.decoding
+                      if r.num_output_tokens < self.preempt_after_tokens]
+        if not candidates:
+            return
+
+        outlier = max(candidates, key=lambda r: abs(r.estimated_output_tokens - median_len))
+        self._preempt(outlier)
+        # Re-insert into flat list so relative batching can pick it up later
+        self._pending_flat.append(outlier)
 
     # ------------------------------------------------------------------
     # Policy helpers
