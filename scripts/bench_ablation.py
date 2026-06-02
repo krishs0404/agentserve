@@ -140,11 +140,13 @@ def run_mode(
     enable_overflow: bool,
     enable_preemption: bool,
     use_relative_batching: bool = False,
+    use_combined_batching: bool = False,
 ) -> dict:
     engine = Engine(
         config=config,
         use_mock=use_mock,
-        agent_aware=enable_priority or enable_overflow or enable_preemption or use_relative_batching,
+        agent_aware=enable_priority or enable_overflow or enable_preemption
+                    or use_relative_batching or use_combined_batching,
         max_batch_size=max_batch_size,
         num_cache_blocks=1024,
         model_dir=model_dir,
@@ -152,6 +154,7 @@ def run_mode(
         enable_overflow=enable_overflow,
         enable_preemption=enable_preemption,
         use_relative_batching=use_relative_batching,
+        use_combined_batching=use_combined_batching,
     )
 
     # Re-create requests for this run (fresh state)
@@ -339,20 +342,22 @@ def main():
         max_batch_size=args.max_batch,
     )
 
-    # (label, priority, overflow, preemption, relative_batching)
+    # (label, priority, overflow, preemption, relative_batching, combined_batching)
     modes = [
-        ("(a) Baseline FIFO",       False, False, False, False),
-        ("(b) Priority only",        True,  False, False, False),
-        ("(c) Priority + Overflow",  True,  True,  False, False),
-        ("(d) All 3 Policies",       True,  True,  True,  False),
-        ("(e) Relative Batching",    False, False, False, True),
+        ("(a) Baseline FIFO",        False, False, False, False, False),
+        ("(b) Priority only",         True,  False, False, False, False),
+        ("(c) Priority + Overflow",   True,  True,  False, False, False),
+        ("(d) All 3 Policies",        True,  True,  True,  False, False),
+        ("(e) Relative Batching",     False, False, False, True,  False),
+        ("(f) Priority + Relative",   True,  True,  True,  False, True),
     ]
 
     results = []
-    for label, pri, ovf, pre, rel in modes:
+    for label, pri, ovf, pre, rel, comb in modes:
         print(f"  Running {label}...")
         r = run_mode(label, enable_priority=pri, enable_overflow=ovf,
-                     enable_preemption=pre, use_relative_batching=rel, **common)
+                     enable_preemption=pre, use_relative_batching=rel,
+                     use_combined_batching=comb, **common)
         results.append(r)
         print(f"    wall={r['wall_s']:.2f}s  tps={r['throughput_tps']:.1f}  "
               f"easy_lat={r['easy_mean_lat_s']:.3f}s  hard_lat={r['hard_mean_lat_s']:.3f}s")

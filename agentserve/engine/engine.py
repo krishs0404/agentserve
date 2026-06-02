@@ -96,6 +96,7 @@ class Engine:
         enable_preemption: bool = True,
         scheduler_policy: Optional[SchedulerPolicy] = None,
         use_relative_batching: bool = False,
+        use_combined_batching: bool = False,
     ):
         self.config = config
         self.eos_token_id = eos_token_id
@@ -130,13 +131,13 @@ class Engine:
             enable_preemption=enable_preemption,
             policy=scheduler_policy,
             use_relative_batching=use_relative_batching,
+            use_combined_batching=use_combined_batching,
         )
 
-        # Online output-length predictor (used when use_relative_batching=True,
-        # updates after every completion regardless of mode)
         from agentserve.engine.length_predictor import OutputLengthPredictor
         self.predictor = OutputLengthPredictor()
         self.use_relative_batching = use_relative_batching
+        self.use_combined_batching = use_combined_batching
 
         # KV-cache block allocator
         self.allocator = BlockAllocator(
@@ -244,7 +245,7 @@ class Engine:
             diff = self.classifier.classify(req.prompt)
             req.difficulty = diff.level.value
             req.priority = diff.priority
-            if self.use_relative_batching:
+            if self.use_relative_batching or self.use_combined_batching:
                 req.estimated_output_tokens = int(self.predictor.predict(req.prompt))
             else:
                 req.estimated_output_tokens = diff.estimated_output_tokens

@@ -65,6 +65,7 @@ class Scheduler:
         enable_preemption: bool = True,
         policy: "Optional[SchedulerPolicy]" = None,
         use_relative_batching: bool = False,
+        use_combined_batching: bool = False,
     ):
         """
         Args:
@@ -91,6 +92,7 @@ class Scheduler:
 
         self.soft_cap = int(max_batch_size * overflow_factor)
         self.use_relative_batching = use_relative_batching
+        self.use_combined_batching = use_combined_batching
 
         # Flat list for relative-batching mode (sliding window needs random access)
         self._pending_flat: List[Request] = []
@@ -173,6 +175,8 @@ class Scheduler:
         """Return up to max_prefill_per_step requests to prefill this step."""
         if self.use_relative_batching:
             return self._get_prefill_batch_relative()
+        if self.use_combined_batching:
+            return self._get_prefill_batch_combined()
         if self._next_pending_candidate() is None:
             return []
 
@@ -318,6 +322,60 @@ class Scheduler:
             req.mark_prefill_start()
 
         return best_batch
+
+    def _get_prefill_batch_combined(self) -> List[Request]:
+        """
+        Combined mode: priority ordering (easy → medium → hard) with
+        relative batching applied *within* each tier.
+
+        Easy requests still always go before medium, medium before hard —
+        so agent DAG dependencies get unblocked first. But within the easy
+        tier, instead of strict FIFO we pick the requests whose predicted
+        output lengths cluster most tightly, minimising KV-padding waste
+        during decode without sacrificing the priority bias.
+        """
+        slots = max(0, self.max_batch_size - len(self.decoding))
+        if slots == 0:
+            return []
+
+        n = min(self.max_prefill_per_step, slots)
+        if self.enable_preemption:
+            self._maybe_preempt()
+
+        batch: List[Request] = []
+        for q in (self._pending_easy, self._pending_medium, self._pending_hard):
+            if len(batch) >= n or not q:
+                continue
+            remaining = n - len(batch)
+            selected = self._select_by_similarity(list(q), remaining)
+            for req in selected:
+                q.remove(req)
+                req.mark_prefill_start()
+                batch.append(req)
+        return batch
+
+    def _select_by_similarity(self, candidates: List[Request], n: int) -> List[Request]:
+        """
+        From candidates, return n requests with minimum output-length variance.
+        Falls back to FIFO order when n >= len(candidates).
+        """
+        if len(candidates) <= n:
+            return candidates
+
+        sorted_c = sorted(candidates, key=lambda r: r.estimated_output_tokens)
+        best, best_score = sorted_c[:n], float("inf")
+        now = time.monotonic()
+
+        for i in range(len(sorted_c) - n + 1):
+            window = sorted_c[i: i + n]
+            lengths = [r.estimated_output_tokens for r in window]
+            variance = statistics.variance(lengths) if len(lengths) > 1 else 0.0
+            age_penalty = sum(now - r.arrival_time for r in window)
+            score = variance - 0.15 * age_penalty
+            if score < best_score:
+                best_score, best = score, window
+
+        return best
 
     def _preempt_relative(self) -> None:
         """
