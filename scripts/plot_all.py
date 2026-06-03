@@ -253,8 +253,11 @@ def plot_easy_cdf(ablation_path: Path) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ablation",    default=str(ROOT / "notes/results_20260531_151633.json"))
+    # Ablation: PyTorch 2.5 + TF32, all 7 modes, no torch.compile compile-time artifact
+    ap.add_argument("--ablation",    default=str(ROOT / "notes/results_20260603_151252.json"))
+    # Trajectory: dedicated trajectory benchmark with all 4 policies × 4 templates
     ap.add_argument("--trajectory",  default=str(ROOT / "notes/results_20260531_154047.json"))
     ap.add_argument("--sensitivity", default=str(ROOT / "agentserve/engine/sensitivity_sweep.json"))
     args = ap.parse_args()
@@ -273,7 +276,7 @@ def main():
     print("\n4. Easy-request latency CDF:")
     plot_easy_cdf(Path(args.ablation))
 
-    print(f"\nDone.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":

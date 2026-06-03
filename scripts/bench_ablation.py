@@ -247,7 +247,6 @@ def run_vllm(model_dir: str, requests: list[Request], max_tokens: int) -> dict |
 def print_table(results: list[dict]) -> None:
     try:
         from rich.console import Console
-        from rich.table import Table
         from rich import box
         _print_rich(results, Console(), box)
     except ImportError:
@@ -398,7 +397,8 @@ def main():
         # Release CUDA memory between modes to prevent fragmentation OOM at long sequences
         if not args.use_mock and args.model_dir:
             try:
-                import gc, torch
+                import gc
+                import torch
                 gc.collect()
                 torch.cuda.empty_cache()
             except Exception:

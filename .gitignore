@@ -29,6 +29,9 @@ results/*.png
 # Recorded traces (user-generated, not committed)
 traces/recorded_*.jsonl
 
+# Large generated trace files (>100MB)
+traces/lmcache_787.jsonl
+
 # IDE / OS
 .DS_Store
 .idea/

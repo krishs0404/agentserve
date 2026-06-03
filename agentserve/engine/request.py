@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from time import monotonic
 from itertools import count
-import uuid
 
 
 class RequestStatus(Enum):

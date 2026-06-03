@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import random
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 
@@ -154,7 +154,7 @@ class TrajectoryGenerator:
             template="chat",
             steps=[
                 StepSpec(f"User: {msgs[0]}\nAssistant:", max_tokens=80),
-                StepSpec(f"User: can you elaborate on that?\nAssistant:", max_tokens=80),
+                StepSpec("User: can you elaborate on that?\nAssistant:", max_tokens=80),
                 StepSpec(f"User: {msgs[1]}\nAssistant:", max_tokens=100),
                 StepSpec("User: Can you summarize what we discussed?\nAssistant:", max_tokens=120),
             ],

@@ -25,7 +25,6 @@ Tensor shape conventions (annotated inline):
   V = vocab_size
 """
 
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

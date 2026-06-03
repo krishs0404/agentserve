@@ -4,7 +4,7 @@ Model configuration for Llama 3.2 variants and a tiny debug config.
 TinyConfig is used in all tests — runs on CPU in milliseconds with no GPU needed.
 The real configs match HuggingFace's published Llama 3.2 architecture.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

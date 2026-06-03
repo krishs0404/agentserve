@@ -15,7 +15,7 @@ tracks block ownership so the scheduler can reason about memory pressure.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import deque
 from typing import Dict, List, Optional
 import torch

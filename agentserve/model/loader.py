@@ -20,8 +20,6 @@ Llama 3.2 weight names on HuggingFace map to our module names as follows:
 
 import os
 from glob import glob
-import torch
-from torch import nn
 from safetensors import safe_open
 
 from agentserve.model.llama import LlamaModel

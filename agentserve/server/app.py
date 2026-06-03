@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator, List, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agentserve.model.config import TinyConfig, Llama32_1B, Llama32_3B, Llama32_8B

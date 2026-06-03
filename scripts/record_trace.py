@@ -18,11 +18,9 @@ Usage:
 import argparse
 import json
 import os
-import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen, Request as URLRequest
-from urllib.parse import urlparse
 import threading
 
 

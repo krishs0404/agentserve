@@ -267,11 +267,11 @@ def main():
               f"medium={medium} ({medium/n:.0%})  "
               f"hard={hard} ({hard/n:.0%})")
 
-    print(f"\nNext steps:")
-    print(f"  # Run trace replay benchmark (mock model):")
+    print("\nNext steps:")
+    print("  # Run trace replay benchmark (mock model):")
     print(f"  uv run python scripts/bench_agent_trace.py --trace {trace_out.relative_to(root)} --compare")
-    print(f"")
-    print(f"  # Retrain classifier on real data:")
+    print("")
+    print("  # Retrain classifier on real data:")
     print(f"  uv run python scripts/train_classifier.py --real-pairs {pairs_out.relative_to(root)}")
 
 

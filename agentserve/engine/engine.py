@@ -24,13 +24,13 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 import torch
 
 from agentserve.model.config import ModelConfig, TinyConfig
 from agentserve.model.llama import LlamaModel, MockModel
-from agentserve.engine.request import Request, RequestStatus
+from agentserve.engine.request import Request
 from agentserve.engine.scheduler import Scheduler
 from agentserve.engine.cache import BlockAllocator
 from agentserve.engine.prefix_cache import PrefixCache

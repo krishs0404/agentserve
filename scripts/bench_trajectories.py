@@ -300,7 +300,8 @@ def main():
         # Release CUDA memory between policy runs to avoid OOM from accumulation
         if args.model_dir is not None:
             try:
-                import gc, torch
+                import gc
+                import torch
                 gc.collect()
                 torch.cuda.empty_cache()
             except Exception:

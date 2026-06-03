@@ -146,7 +146,7 @@ def build_easy_prompt() -> tuple[str, str]:
     template = random.choice(EASY_TEMPLATES)
     prompt = template.format(
         text=random.choice(TEXTS),
-        claim=f"Python lists are O(1) for append",
+        claim="Python lists are O(1) for append",
     )
     full = f"{SYSTEM_PROMPT}\n\n{prompt}"
     return full, "classify/extract/yes-no"

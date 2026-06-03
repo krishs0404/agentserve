@@ -16,7 +16,6 @@ Output:
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -24,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agentserve.engine.learned_difficulty import (
     LearnedDifficultyClassifier,
-    extract_features,
 )
 from agentserve.engine.difficulty import RequestDifficultyClassifier
 from scripts.bench_ablation import EASY, MEDIUM, HARD, make_workload
@@ -80,7 +78,7 @@ def print_gpu_results_summary(results_path: Path) -> None:
         tps_improvement  = (best["throughput_tps"] / baseline["throughput_tps"] - 1) * 100
         print(f"  GPU results: easy-latency improvement = {easy_improvement:.1f}%  "
               f"throughput improvement = {tps_improvement:.1f}%")
-        print(f"  (Training labels use natural expected lengths: easy=20, medium=100, hard=256 tokens)")
+        print("  (Training labels use natural expected lengths: easy=20, medium=100, hard=256 tokens)")
 
 
 def evaluate_keyword_classifier(pairs: list[tuple[str, int]]) -> dict:
@@ -109,7 +107,8 @@ def run_sensitivity_sweep(weights_path: Path, noise_rates: list[float]) -> list[
     from agentserve.engine.engine import Engine
     from agentserve.engine.request import Request
     from agentserve.model.config import TinyConfig
-    import time, statistics
+    import time
+    import statistics
 
     N = 60
     MAX_TOK = 32
@@ -152,13 +151,14 @@ def run_sensitivity_sweep(weights_path: Path, noise_rates: list[float]) -> list[
     tokenize = lambda t: [ord(c) % 256 for c in t]
     wl = make_workload(N, MAX_TOK, tokenize)
     fresh = [Request(prompt=r.prompt, token_ids=list(r.token_ids), max_tokens=r.max_tokens) for r in wl]
-    import time, statistics
     t0 = time.monotonic()
     comp = baseline_engine.generate(fresh)
     by_diff = {"easy": [], "hard": []}
     for r in comp:
-        if r.difficulty == "easy": by_diff["easy"].append(r.latency)
-        if r.difficulty == "hard": by_diff["hard"].append(r.latency)
+        if r.difficulty == "easy":
+            by_diff["easy"].append(r.latency)
+        if r.difficulty == "hard":
+            by_diff["hard"].append(r.latency)
     def mean(xs): return statistics.mean(xs) if xs else 0.0
     baseline_easy = mean(by_diff["easy"])
     baseline_hard  = mean(by_diff["hard"])

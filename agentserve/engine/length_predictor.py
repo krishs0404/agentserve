@@ -14,7 +14,6 @@ learns that within a few hundred requests.
 
 from __future__ import annotations
 import math
-import re
 
 
 # ── Feature extraction ─────────────────────────────────────────────────────────

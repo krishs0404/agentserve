@@ -26,7 +26,6 @@ Reduce scope for a quick sanity check (~5 min, ~$0.07):
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -213,9 +212,9 @@ def main(
         print("AgentServe Benchmark Run")
         print(f"  Ablation  : {num_requests} requests × 6 modes (a–f), batch={max_batch}")
         print(f"  Trajectory: {n_traj} trajectories × 4 templates × 4 policies")
-        print(f"  GPU       : A10G (24 GB VRAM)")
-        print(f"  Est. time : 40-60 min")
-        print(f"  Est. cost : ~$0.60-0.80")
+        print("  GPU       : A10G (24 GB VRAM)")
+        print("  Est. time : 40-60 min")
+        print("  Est. cost : ~$0.60-0.80")
         print()
 
     results = run_benchmarks.remote(
