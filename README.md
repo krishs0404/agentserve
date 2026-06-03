@@ -67,12 +67,14 @@ Workload: 100 synthetic agent requests — 64 easy (classification/extraction), 
 
 | Mode | Easy lat | Hard lat | Throughput | TTFT |
 |---|---|---|---|---|
-| (a) Baseline FIFO | 11.89 s | 10.91 s | 314 tok/s | 9.11 s |
-| (b) Priority only | **8.01 s** | 19.30 s | 321 tok/s | 8.59 s |
-| (c) Priority + Overflow | **8.11 s** | 19.07 s | **332 tok/s** | 8.13 s |
-| (d) All 3 Policies | **8.11 s** | 19.13 s | 331 tok/s | 8.15 s |
-| (e) Relative Batching | 11.57 s | **9.91 s** | 317 tok/s | 8.77 s |
-| (f) Priority + Relative | **8.09 s** | 19.51 s | 315 tok/s | 8.66 s |
+| (a) Baseline FIFO | 11.84 s | 10.85 s | 314 tok/s | 9.07 s |
+| (b) Priority only | **7.97 s** | 19.21 s | 322 tok/s | 8.55 s |
+| (c) Priority + Overflow | **8.10 s** | 19.00 s | **334 tok/s** | 8.12 s |
+| (d) All 3 Policies | **8.07 s** | 19.02 s | 333 tok/s | 8.10 s |
+| (e) Relative Batching | 11.47 s | **9.83 s** | 320 tok/s | 8.69 s |
+| (f) Priority + Relative | **8.05 s** | 19.38 s | 319 tok/s | 8.63 s |
+
+*Benchmarked with Flash Attention 2 (PyTorch SDPA) on A10G, Llama 3.2-1B, 100 requests.*
 
 **Key findings:**
 
@@ -97,7 +99,14 @@ Mode (f) matches priority mode on easy latency (8.09 s, same as modes b–d) but
 
 The critical finding: **per-request priority scheduling gives zero benefit for trajectory completion time.** It improves individual request latency but doesn't understand step dependencies. Trajectory-aware policies cut ReAct TCT 6× and Plan-Execute TCT 2.6×.
 
-Which trajectory policy wins depends on the template: `traj_progress` is best for short 3-step chains (front-load near-complete trajectories), `traj_deadline` is best for longer 4-step chains with uneven token budgets (urgency scoring).
+Policy selection depends on session structure:
+
+- `traj_progress` wins for **short, uniform-step chains** (ReAct: 6×, Reflect: 1.7×). Front-loading near-complete trajectories works when all steps have similar cost.
+- `traj_deadline` wins for **longer chains with uneven step costs** (Plan-Execute: 2.6× vs traj_progress's 1.2×). Urgency scoring is better when early steps are long (planning: ~150 tokens) and the agent accumulates time pressure.
+- Neither policy helps chat (both ≈1.0×) — 4-turn conversations have no parallelism to exploit since each turn depends on the previous one from the same user.
+- **Average speedup across all templates**: traj_deadline 2.70×, traj_progress 2.48×, priority 0.99×.
+
+A workload-adaptive scheduler that selects between traj_progress and traj_deadline based on detected session structure (short/uniform vs long/variable) would capture the best of both.
 
 ### Classifier robustness
 
@@ -294,7 +303,7 @@ notes/
 ## Design Decisions
 
 **Attention implementation: `F.scaled_dot_product_attention` (Flash Attention 2)**
-Both attention paths use PyTorch's SDPA, which automatically dispatches to Flash Attention 2 on CUDA with PyTorch 2.4+. This gives production-grade efficiency with no custom kernel code. The causal mask and GQA expansion are handled in PyTorch; SDPA fuses the softmax and matmuls into a single GPU kernel. The scheduling policies sit above the attention layer and are independent of it — any future kernel upgrade (Triton, cuDNN, etc.) does not change the scheduling architecture.
+Both attention paths use PyTorch's SDPA, which automatically dispatches to Flash Attention 2 on CUDA with PyTorch 2.4+. SDPA fuses softmax and matmuls into a single kernel; at short sequences (max_tokens=64) the throughput gain is within noise because the bottleneck is Python scheduler overhead, not the CUDA kernel. At longer sequences (max_tokens=256+), the O(n²) → O(n) memory improvement of FA2 becomes measurable. `torch.compile(model, dynamic=True)` is supported via `Engine(compile_model=True)` and compounds the SDPA benefit by eliminating Python dispatch overhead in the forward loop. The scheduling policies sit above the attention layer and are independent of any kernel choice.
 
 **Why a heuristic classifier rather than a purely learned one?**
 The classifier runs synchronously before scheduling and must add zero latency. The keyword heuristic takes microseconds. The learned predictor (`length_predictor.py`) is complementary: it provides continuous estimates for the relative-batching mode, and improves with every completion via online SGD. The heuristic remains the primary scheduler signal.
@@ -315,7 +324,8 @@ The synthetic workload (60% easy, 25% medium, 15% hard) models general-purpose t
 
 ## Known Limitations
 
-- **No FlashAttention**: PyTorch attention with manual masking. ~16× lower throughput than vLLM on the same hardware. Orthogonal to scheduling.
-- **Fake tokenizer in trace replay**: the `bench_agent_trace.py` replay uses `ord(c) % 256` per character rather than real BPE. Token counts are approximate; latency ratios between modes are valid.
-- **Difficulty classifier misses code patches in multi-turn context**: later turns in a SWE-bench session have long accumulated prompts but often short outputs (tool calls). The classifier correctly skips the length threshold, but has no way to predict when a tool result will trigger a long code patch response without session-state features.
+- **Fake tokenizer in trace replay**: `bench_agent_trace.py` uses `ord(c) % 256` per character rather than real BPE. Token counts are approximate; latency ratios between modes are valid.
+- **Difficulty classifier: keywords outperform learned model on real SWE-bench data**. Training the `LearnedDifficultyClassifier` on 24,880 real lmcache-agentic-traces achieves 46% bucket accuracy vs 63.8% for the keyword heuristic. The structural features (prompt length, keyword presence) don't predict SWE-bench output lengths well — most responses are short tool calls regardless of prompt content, and the "hard" code patches are triggered by task state (root cause found, ready to write) that isn't visible in the current prompt. Session-state features (turn count, recent error signals) would be needed to close this gap.
+- **Classifier misses code patches in multi-turn context**: the classifier skips the length threshold for multi-turn prompts, but can't predict when a tool result will trigger a long code patch without session-state features.
 - **Prefix cache hit rate is 0% on synthetic workloads**: synthetic prompts are unique, so no prefix sharing occurs. The 90% hit rate is observed only on real multi-session traces with shared system prompts.
+- **SDPA speedup is within noise for short sequences**: at max_tokens=64 and batch_size=16, the Python scheduler loop is the bottleneck, not the CUDA kernel. The SDPA benefit grows at longer sequence lengths (256+ tokens) where Flash Attention's memory advantage matters.
