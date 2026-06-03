@@ -365,6 +365,14 @@ def main():
         results.append(r)
         print(f"    wall={r['wall_s']:.2f}s  tps={r['throughput_tps']:.1f}  "
               f"easy_lat={r['easy_mean_lat_s']:.3f}s  hard_lat={r['hard_mean_lat_s']:.3f}s")
+        # Release CUDA memory between modes to prevent fragmentation OOM at long sequences
+        if not args.use_mock and args.model_dir:
+            try:
+                import gc, torch
+                gc.collect()
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     if args.compare_vllm and args.model_dir:
         print("  Running vLLM baseline...")

@@ -108,6 +108,22 @@ Policy selection depends on session structure:
 
 A workload-adaptive scheduler that selects between traj_progress and traj_deadline based on detected session structure (short/uniform vs long/variable) would capture the best of both.
 
+### Scheduling benefit vs workload heterogeneity
+
+Priority scheduling benefit scales inversely with the fraction of easy requests:
+
+| Easy requests | Hard requests | Easy-latency improvement |
+|---|---|---|
+| 3% | 72% | +78% |
+| 15% | 60% | +63% |
+| 30% | 45% | +47% |
+| 60% | 15% | +24% |
+| 75% | 5% | +9% |
+
+When easy requests are rare, each one is blocked behind more hard requests in FIFO. Priority scheduling provides the greatest relief in exactly this case. This explains the SWE-bench finding: with ≈0% easy requests, there is nothing to promote and priority scheduling provides no benefit.
+
+The practical implication: priority scheduling is most effective for heterogeneous general-purpose agents. For specialized code-debugging agents (SWE-bench: 0% easy) the primary scheduling lever is the trajectory-aware policies, not per-request priority.
+
 ### Classifier robustness
 
 The scheduling benefit is robust to classifier errors. Using the mock model with artificially injected noise (random label flips at various rates):
