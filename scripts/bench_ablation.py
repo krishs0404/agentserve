@@ -142,6 +142,7 @@ def run_mode(
     use_relative_batching: bool = False,
     use_combined_batching: bool = False,
     compile_model: bool = False,
+    shared_model=None,           # pre-built (and optionally compiled) model to reuse
 ) -> dict:
     engine = Engine(
         config=config,
@@ -158,6 +159,9 @@ def run_mode(
         use_combined_batching=use_combined_batching,
         compile_model=compile_model,
     )
+    # Replace engine model with pre-built shared model to avoid re-loading/compiling
+    if shared_model is not None:
+        engine.model = shared_model
 
     # Re-create requests for this run (fresh state)
     fresh = [
@@ -346,6 +350,23 @@ def main():
         max_batch_size=args.max_batch,
     )
 
+    # When --compile is set, build and compile the model ONCE and share it across
+    # all 6 modes — otherwise torch.compile pays full recompilation cost per mode.
+    shared_model = None
+    if args.compile and not args.use_mock and args.model_dir:
+        import torch
+        from agentserve.model.llama import LlamaModel
+        from agentserve.model.loader import load_weights
+        print("  Compiling model (one-time, ~30s)...")
+        shared_model = LlamaModel(config)
+        load_weights(shared_model, args.model_dir)
+        shared_model = shared_model.to("cuda").eval()
+        shared_model = torch.compile(shared_model, mode="reduce-overhead", dynamic=True)
+        # Warm up: run one prefill to trigger JIT before timing
+        _dummy = [1, 2, 3, 4, 5]
+        shared_model.forward(_dummy)
+        print("  Compilation complete.")
+
     # (label, priority, overflow, preemption, relative_batching, combined_batching)
     modes = [
         ("(a) Baseline FIFO",        False, False, False, False, False),
@@ -361,7 +382,8 @@ def main():
         print(f"  Running {label}...")
         r = run_mode(label, enable_priority=pri, enable_overflow=ovf,
                      enable_preemption=pre, use_relative_batching=rel,
-                     use_combined_batching=comb, compile_model=args.compile, **common)
+                     use_combined_batching=comb, compile_model=args.compile,
+                     shared_model=shared_model, **common)
         results.append(r)
         print(f"    wall={r['wall_s']:.2f}s  tps={r['throughput_tps']:.1f}  "
               f"easy_lat={r['easy_mean_lat_s']:.3f}s  hard_lat={r['hard_mean_lat_s']:.3f}s")

@@ -152,7 +152,9 @@ def run_benchmarks(
     if compile_model:
         ablation_cmd.append("--compile")
 
-    subprocess.run(ablation_cmd)
+    import os as _os
+    ablation_env = {**_os.environ, "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
+    subprocess.run(ablation_cmd, env=ablation_env)
 
     try:
         with open(ablation_json) as f:
