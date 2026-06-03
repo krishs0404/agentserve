@@ -54,24 +54,28 @@
 
 ---
 
-## [2:00–2:30] Live Demo
+## [2:00–2:30] Architecture Walkthrough
 
-*Run in terminal:*
-```bash
-uv run python scripts/demo.py
-```
+*Show: `ls agentserve/engine/` in terminal or a simple ASCII diagram*
 
-*Let it run 30–40 seconds, narrate:*
-
-> "Left side is plain FIFO. Right side is all three agent-aware policies. Same
-> workload — 60% classification calls, 25% summaries, 15% code generation.
+> "Here's the engine structure. The entry point is `engine.py`, which ties three
+> layers together.
 >
-> Watch the green dots. Those are easy requests. On the left they're stuck behind
-> the red squares — the hard requests — and they wait their turn. On the right they
-> skip ahead. The easy latency counter at the bottom will start diverging in about
-> 20 seconds."
-
-*Wait for numbers to diverge visibly, then Ctrl+C.*
+> Layer one: the difficulty classifier in `difficulty.py`. Inspects the tail of
+> the prompt for keywords. Tags each request easy, medium, or hard in under a
+> millisecond. Detects multi-turn conversation format and focuses on the most recent
+> instruction, not the full accumulated history.
+>
+> Layer two: the scheduler in `scheduler.py`. Six modes. The simplest is three O(1)
+> FIFO deques — one per difficulty level. Easy drains first. Soft overflow admits extra
+> easy requests past the batch cap. Preemption evicts the youngest hard request when
+> an easy one has waited too long. For specialized workloads, a sliding-window
+> relative batching mode groups requests by predicted output length instead of by
+> difficulty bin.
+>
+> Layer three: pluggable trajectory policies in `policies.py`. Two methods — priority
+> key and on-complete. Drop in any policy object; the scheduling loop doesn't change.
+> I'll show why this design matters when I get to the trajectory results."
 
 ---
 

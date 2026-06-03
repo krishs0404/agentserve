@@ -161,35 +161,28 @@ class LlamaAttention(nn.Module):
                 T_total, self.n_heads, self.head_dim
             )  # [T_total, H, D]
 
-        # Scaled dot-product attention
-        # Rearrange to [H, T, D] for batch matmul
-        q = q.transpose(0, 1)       # [H, T, D]
-        k = k.transpose(0, 1)       # [H, T_total, D]
-        v = v.transpose(0, 1)       # [H, T_total, D]
+        # Rearrange to [H, T, D] — SDPA treats leading dim as batch
+        q = q.transpose(0, 1)  # [H, T, D]
+        k = k.transpose(0, 1)  # [H, T_total, D]
+        v = v.transpose(0, 1)  # [H, T_total, D]
 
-        # scores: [H, T, T_total]
-        scores = torch.bmm(q, k.transpose(1, 2)) * self.scale
-
-        # Causal mask: each query position can only attend to past positions
-        # In prefill: full lower-triangular mask over the prompt
-        # In decode: T=1 so the mask is trivially all-attend (single query)
+        # Causal mask for multi-token prefill. Cached prefix positions (0..offset-1)
+        # always attend freely; only the new token positions get the upper-triangular mask.
+        # Single-token decode (T=1) needs no mask — one query attends to all KV.
+        attn_mask = None
         if T > 1:
-            # [T, T_total] causal mask (T_total >= T when there's a KV-cache prefix)
-            # Cached positions (columns 0..offset-1): all attend (zeros)
-            # New positions (columns offset..T_total-1): upper-triangular -inf
             offset = T_total - T
-            mask = torch.zeros(T, T_total, device=x.device, dtype=scores.dtype)
+            attn_mask = torch.zeros(T, T_total, device=x.device, dtype=q.dtype)
             causal = torch.triu(
-                torch.full((T, T), float("-inf"), device=x.device, dtype=scores.dtype),
+                torch.full((T, T), float("-inf"), device=x.device, dtype=q.dtype),
                 diagonal=1,
             )
-            mask[:, offset:] = causal
-            scores = scores + mask.unsqueeze(0)
+            attn_mask[:, offset:] = causal
+            attn_mask = attn_mask.unsqueeze(0)  # [1, T, T_total] broadcast over heads
 
-        # Compute softmax in float32 for numerical stability, cast back to working dtype
-        attn = F.softmax(scores.float(), dim=-1).to(scores.dtype)  # [H, T, T_total]
-        out = torch.bmm(attn, v)                   # [H, T, D]
-        out = out.transpose(0, 1).reshape(T, -1)   # [T, H*D]
+        # Flash Attention via PyTorch SDPA — dispatches to FA2 on CUDA when available
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)  # [H, T, D]
+        out = out.transpose(0, 1).reshape(T, -1)  # [T, H*D]
 
         return self.o_proj(out), new_kv_cache       # [T, hidden_dim]
 
@@ -353,19 +346,17 @@ class LlamaModel(nn.Module):
             k_4d = k_exp.transpose(1, 2)            # [B, H, total_len, D]
             v_4d = v_exp.transpose(1, 2)            # [B, H, total_len, D]
 
-            scores = torch.matmul(q_4d, k_4d.transpose(2, 3)) * layer.attn.scale  # [B, H, 1, total_len]
-
-            # Mask padded positions for requests with shorter histories
+            # Build padding mask so shorter sequences don't attend to pad positions
+            attn_mask = None
             min_len = min(seq_lens)
             if min_len < max_len:
-                mask = scores.new_zeros(B, 1, 1, total_len)
+                attn_mask = x.new_zeros(B, 1, 1, total_len)
                 for b in range(B):
                     if seq_lens[b] < max_len:
-                        mask[b, 0, 0, seq_lens[b]:max_len] = float("-inf")
-                scores = scores + mask
+                        attn_mask[b, 0, 0, seq_lens[b]:max_len] = float("-inf")
 
-            attn = F.softmax(scores.float(), dim=-1).to(x.dtype)  # [B, H, 1, total_len]
-            out = torch.matmul(attn, v_4d)                         # [B, H, 1, D]
+            # Flash Attention via PyTorch SDPA
+            out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=attn_mask)  # [B, H, 1, D]
             out = out.squeeze(2).transpose(1, 2).reshape(B, H * D) # [B, H*D]
             attn_out = layer.attn.o_proj(out)                       # [B, hidden_dim]
 
