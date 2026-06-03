@@ -1,5 +1,7 @@
 # RunPod Benchmark Setup Guide
 
+> **Superseded by `scripts/run_modal.py`** — use Modal for all GPU benchmarks (cheaper, no manual SSH, results auto-saved locally). This guide is kept for reference only.
+
 Goal: run the 4-mode ablation on a real Llama-3.2-1B model on a GPU instance,
 then compare against vLLM on the same workload.
 

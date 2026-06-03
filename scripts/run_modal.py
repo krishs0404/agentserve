@@ -204,7 +204,7 @@ def main(
     """
     if not dry_run:
         print("AgentServe Benchmark Run")
-        print(f"  Ablation  : {num_requests} requests × 5 modes (a–e), batch={max_batch}")
+        print(f"  Ablation  : {num_requests} requests × 6 modes (a–f), batch={max_batch}")
         print(f"  Trajectory: {n_traj} trajectories × 4 templates × 4 policies")
         print(f"  GPU       : A10G (24 GB VRAM)")
         print(f"  Est. time : 40-60 min")
