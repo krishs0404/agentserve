@@ -98,6 +98,7 @@ class Engine:
         use_relative_batching: bool = False,
         use_combined_batching: bool = False,
         compile_model: bool = False,
+        use_paged_kv: bool = False,
     ):
         self.config = config
         self.eos_token_id = eos_token_id
@@ -152,15 +153,21 @@ class Engine:
         self.predictor = OutputLengthPredictor()
         self.use_relative_batching = use_relative_batching
         self.use_combined_batching = use_combined_batching
+        self.use_paged_kv = use_paged_kv and not use_mock
 
-        # KV-cache block allocator
+        # KV-cache block allocator — allocates the physical tensor pool when
+        # paged KV is enabled so the model can read/write K/V without per-step
+        # Python tensor allocation.
         self.allocator = BlockAllocator(
             num_blocks=num_cache_blocks,
             block_size=block_size,
             num_layers=config.n_layers,
             num_kv_heads=config.n_kv_heads,
             head_dim=config.head_dim,
+            allocate_tensor=self.use_paged_kv,
         )
+        if self.use_paged_kv and self.allocator.kv_pool is not None:
+            self.allocator.kv_pool = self.allocator.kv_pool.to(self.device).half()
 
         # Prefix cache (LFU eviction)
         self.prefix_cache = PrefixCache(
@@ -299,8 +306,16 @@ class Engine:
             kv_cache=req.kv_cache,
             position_offset=req.num_cached_tokens,
         )
-        req.kv_cache = kv_cache
         req.num_cached_tokens = len(req.token_ids)
+
+        if self.use_paged_kv:
+            # Write prefill K/V into the physical pool; requests no longer carry
+            # growing tensor lists — only the block table (small integer list).
+            for layer_idx, (k, v) in enumerate(kv_cache):
+                self.allocator.write_kv_prefill(req.request_id, layer_idx, k, v)
+            req.kv_cache = None  # pool is the source of truth
+        else:
+            req.kv_cache = kv_cache
 
         # Sample the first output token from the last logit position
         first_token = int(self._sample(logits[-1:]).item())
@@ -330,25 +345,38 @@ class Engine:
             self.prefix_cache.store(req.token_ids[:complete_blocks_len], block_ids, kv_for_cache)
 
     def _decode_batch(self, decode_batch: List[Request]) -> List[Request]:
-        """One batched forward pass for all decode-phase requests.
-
-        Replaces the old per-request _decode_step loop: all B requests are
-        processed in a single model.forward_decode_batch call, amortising
-        weight reads across the batch.
-        """
+        """One batched forward pass for all decode-phase requests."""
         last_tokens = [req.output_token_ids[-1] for req in decode_batch]
         positions   = [req.num_cached_tokens + req.num_output_tokens - 1 for req in decode_batch]
-        kv_caches   = [req.kv_cache for req in decode_batch]
 
-        logits_batch, new_kv_caches = self.model.forward_decode_batch(
-            last_token_ids=last_tokens,
-            kv_caches=kv_caches,
-            position_offsets=positions,
-        )
+        if self.use_paged_kv:
+            # Paged path: K/V lives in the pre-allocated pool; no per-request lists.
+            # seq_lens = tokens seen so far (prompt + previously generated, excluding
+            # the one we're about to write).
+            seq_lens = [req.num_cached_tokens + req.num_output_tokens - 1
+                        for req in decode_batch]
+            request_ids = [req.request_id for req in decode_batch]
+
+            logits_batch, _ = self.model.forward_decode_paged(
+                last_token_ids=last_tokens,
+                seq_lens=seq_lens,
+                position_offsets=positions,
+                allocator=self.allocator,
+                request_ids=request_ids,
+            )
+            # kv_cache on the request stays None; pool holds the data
+        else:
+            kv_caches = [req.kv_cache for req in decode_batch]
+            logits_batch, new_kv_caches = self.model.forward_decode_batch(
+                last_token_ids=last_tokens,
+                kv_caches=kv_caches,
+                position_offsets=positions,
+            )
+            for i, req in enumerate(decode_batch):
+                req.kv_cache = new_kv_caches[i]
 
         newly_done: List[Request] = []
         for i, req in enumerate(decode_batch):
-            req.kv_cache = new_kv_caches[i]
             next_token = int(self._sample(logits_batch[i : i + 1]).item())
             done = self.scheduler.on_decode_step(req, next_token, self.eos_token_id)
             if done:

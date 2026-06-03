@@ -117,3 +117,73 @@ class BlockAllocator:
     def blocks_needed(self, num_tokens: int) -> int:
         """How many blocks are required to store num_tokens?"""
         return (num_tokens + self.block_size - 1) // self.block_size
+
+    # ------------------------------------------------------------------
+    # Physical KV pool read/write (only valid when allocate_tensor=True)
+    # ------------------------------------------------------------------
+
+    def write_kv_prefill(
+        self,
+        request_id: str,
+        layer: int,
+        k: "torch.Tensor",  # [T, Kh, D]
+        v: "torch.Tensor",  # [T, Kh, D]
+    ) -> None:
+        """Write all T prompt tokens' K/V into the pool for a given layer."""
+        assert self.kv_pool is not None, "kv_pool not allocated (pass allocate_tensor=True)"
+        block_ids = self._request_blocks[request_id]
+        T = k.shape[0]
+        for tok in range(T):
+            b = block_ids[tok // self.block_size]
+            o = tok % self.block_size
+            self.kv_pool[0, layer, b, o] = k[tok]
+            self.kv_pool[1, layer, b, o] = v[tok]
+
+    def write_kv_decode(
+        self,
+        request_id: str,
+        token_pos: int,
+        layer: int,
+        k: "torch.Tensor",  # [Kh, D]
+        v: "torch.Tensor",  # [Kh, D]
+    ) -> None:
+        """Write one new decode token's K/V into the pool."""
+        assert self.kv_pool is not None
+        block_ids = self._request_blocks[request_id]
+        b = block_ids[token_pos // self.block_size]
+        o = token_pos % self.block_size
+        self.kv_pool[0, layer, b, o] = k
+        self.kv_pool[1, layer, b, o] = v
+
+    def gather_kv(
+        self,
+        request_id: str,
+        seq_len: int,
+        layer: int,
+    ) -> "tuple[torch.Tensor, torch.Tensor]":
+        """
+        Gather K/V for the first seq_len tokens from the pool.
+
+        Returns two tensors of shape [seq_len, Kh, D].
+        Reads are contiguous within each block — typically one or a handful
+        of block-sized slices rather than token-by-token copies.
+        """
+        assert self.kv_pool is not None
+        block_ids = self._request_blocks[request_id]
+        n_full = seq_len // self.block_size
+        remainder = seq_len % self.block_size
+
+        parts_k, parts_v = [], []
+        for i in range(n_full):
+            parts_k.append(self.kv_pool[0, layer, block_ids[i]])   # [block_size, Kh, D]
+            parts_v.append(self.kv_pool[1, layer, block_ids[i]])
+        if remainder:
+            parts_k.append(self.kv_pool[0, layer, block_ids[n_full], :remainder])
+            parts_v.append(self.kv_pool[1, layer, block_ids[n_full], :remainder])
+
+        if not parts_k:
+            shape = self.kv_pool.shape[-2:]
+            z = self.kv_pool.new_zeros(0, *shape)
+            return z, z
+
+        return torch.cat(parts_k, dim=0), torch.cat(parts_v, dim=0)

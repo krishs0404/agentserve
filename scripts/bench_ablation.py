@@ -142,7 +142,8 @@ def run_mode(
     use_relative_batching: bool = False,
     use_combined_batching: bool = False,
     compile_model: bool = False,
-    shared_model=None,           # pre-built (and optionally compiled) model to reuse
+    use_paged_kv: bool = False,
+    shared_model=None,
 ) -> dict:
     engine = Engine(
         config=config,
@@ -158,6 +159,7 @@ def run_mode(
         use_relative_batching=use_relative_batching,
         use_combined_batching=use_combined_batching,
         compile_model=compile_model,
+        use_paged_kv=use_paged_kv,
     )
     # Replace engine model with pre-built shared model to avoid re-loading/compiling
     if shared_model is not None:
@@ -372,23 +374,24 @@ def main():
             print(f"  WARNING: torch.compile warmup failed ({type(e).__name__}). "
                   f"Requires PyTorch >= 2.5; falling back to eager SDPA.")
 
-    # (label, priority, overflow, preemption, relative_batching, combined_batching)
+    # (label, priority, overflow, preemption, relative_batching, combined_batching, paged_kv)
     modes = [
-        ("(a) Baseline FIFO",        False, False, False, False, False),
-        ("(b) Priority only",         True,  False, False, False, False),
-        ("(c) Priority + Overflow",   True,  True,  False, False, False),
-        ("(d) All 3 Policies",        True,  True,  True,  False, False),
-        ("(e) Relative Batching",     False, False, False, True,  False),
-        ("(f) Priority + Relative",   True,  True,  True,  False, True),
+        ("(a) Baseline FIFO",        False, False, False, False, False, False),
+        ("(b) Priority only",         True,  False, False, False, False, False),
+        ("(c) Priority + Overflow",   True,  True,  False, False, False, False),
+        ("(d) All 3 Policies",        True,  True,  True,  False, False, False),
+        ("(e) Relative Batching",     False, False, False, True,  False, False),
+        ("(f) Priority + Relative",   True,  True,  True,  False, True,  False),
+        ("(g) Priority + PagedKV",    True,  True,  True,  False, False, True),
     ]
 
     results = []
-    for label, pri, ovf, pre, rel, comb in modes:
+    for label, pri, ovf, pre, rel, comb, paged in modes:
         print(f"  Running {label}...")
         r = run_mode(label, enable_priority=pri, enable_overflow=ovf,
                      enable_preemption=pre, use_relative_batching=rel,
                      use_combined_batching=comb, compile_model=args.compile,
-                     shared_model=shared_model, **common)
+                     use_paged_kv=paged, shared_model=shared_model, **common)
         results.append(r)
         print(f"    wall={r['wall_s']:.2f}s  tps={r['throughput_tps']:.1f}  "
               f"easy_lat={r['easy_mean_lat_s']:.3f}s  hard_lat={r['hard_mean_lat_s']:.3f}s")

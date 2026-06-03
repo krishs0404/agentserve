@@ -377,6 +377,105 @@ class LlamaModel(nn.Module):
         return logits, new_kv_caches
 
     @torch.inference_mode()
+    def forward_decode_paged(
+        self,
+        last_token_ids: list[int],
+        seq_lens: list[int],
+        position_offsets: list[int],
+        allocator: "object",   # BlockAllocator — typed as object to avoid circular import
+        request_ids: list[str],
+    ) -> tuple[torch.Tensor, None]:
+        """
+        Paged batched decode: reads K/V from the pre-allocated pool via block tables
+        instead of from per-request Python tensor lists.
+
+        Benefits over forward_decode_batch:
+          - No per-step Python allocation (pool is pre-allocated once)
+          - K/V reads are contiguous block slices from GPU memory (cache-friendly)
+          - Enables true prefix sharing: requests sharing a prefix point to the
+            same physical blocks (zero-copy)
+
+        After computing the new token, writes the new K/V back to the pool.
+
+        Returns:
+            logits:    [B, vocab_size]
+            None:      no new_kv_caches returned (pool updated in-place)
+        """
+        B = len(last_token_ids)
+        if B == 0:
+            return torch.zeros(0, self.config.vocab_size), None
+
+        device = self.rope_table.device
+        tokens = torch.tensor(last_token_ids, dtype=torch.long, device=device)
+        x = self.embed(tokens)                                      # [B, hidden_dim]
+        positions = torch.tensor(position_offsets, dtype=torch.long, device=device)
+        cos_sin_batch = self.rope_table[positions]                  # [B, head_dim]
+
+        Kh = self.config.n_kv_heads
+        D  = self.config.head_dim
+        H  = self.config.n_heads
+        n_groups = H // Kh
+        max_len = max(seq_lens)
+
+        for layer_idx, layer in enumerate(self.layers):
+            # ── Gather K/V from the paged pool (block-contiguous reads) ──────
+            k_padded = x.new_zeros(B, max_len, Kh, D)
+            v_padded = x.new_zeros(B, max_len, Kh, D)
+            for b, (rid, L) in enumerate(zip(request_ids, seq_lens)):
+                k_b, v_b = allocator.gather_kv(rid, L, layer_idx)
+                k_padded[b, :L] = k_b.to(dtype=x.dtype, device=device)
+                v_padded[b, :L] = v_b.to(dtype=x.dtype, device=device)
+
+            # ── Project Q/K/V for new token ───────────────────────────────────
+            h    = layer.attn_norm(x)
+            q    = layer.attn.q_proj(h).view(B, H, D)
+            k_n  = layer.attn.k_proj(h).view(B, Kh, D)
+            v_n  = layer.attn.v_proj(h).view(B, Kh, D)
+            q    = apply_rope(q,   cos_sin_batch)
+            k_n  = apply_rope(k_n, cos_sin_batch)
+
+            # ── Write new token K/V back to pool ──────────────────────────────
+            for b, (rid, L) in enumerate(zip(request_ids, seq_lens)):
+                allocator.write_kv_decode(rid, L, layer_idx,
+                                          k_n[b].detach(), v_n[b].detach())
+
+            # ── Build full K/V and run SDPA ───────────────────────────────────
+            k_full = torch.cat([k_padded, k_n.unsqueeze(1)], dim=1)  # [B, max_len+1, Kh, D]
+            v_full = torch.cat([v_padded, v_n.unsqueeze(1)], dim=1)
+            total_len = max_len + 1
+
+            if n_groups > 1:
+                k_exp = (k_full.unsqueeze(3)
+                               .expand(B, total_len, Kh, n_groups, D)
+                               .reshape(B, total_len, H, D))
+                v_exp = (v_full.unsqueeze(3)
+                               .expand(B, total_len, Kh, n_groups, D)
+                               .reshape(B, total_len, H, D))
+            else:
+                k_exp, v_exp = k_full, v_full
+
+            q_4d = q.unsqueeze(2)
+            k_4d = k_exp.transpose(1, 2)
+            v_4d = v_exp.transpose(1, 2)
+
+            min_len = min(seq_lens)
+            attn_mask = None
+            if min_len < max_len:
+                seq_lens_t = torch.tensor(seq_lens, device=device)
+                col = torch.arange(total_len, device=device)
+                is_pad = (col[None, :] >= seq_lens_t[:, None]) & (col[None, :] < max_len)
+                attn_mask = x.new_zeros(B, 1, 1, total_len)
+                attn_mask.masked_fill_(is_pad[:, None, None, :], float("-inf"))
+
+            out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=attn_mask)
+            out = out.squeeze(2).transpose(1, 2).reshape(B, H * D)
+            x = x + layer.attn.o_proj(out)
+            x = x + layer.ffn(layer.ffn_norm(x))
+
+        x = self.norm(x)
+        return self.lm_head(x), None  # pool updated in-place, no kv_caches to return
+
+    @torch.inference_mode()
     def forward(
         self,
         token_ids: list[int] | torch.Tensor,

@@ -49,7 +49,7 @@ results_vol = modal.Volume.from_name("agentserve-results", create_if_missing=Tru
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install([
-        "torch==2.4.0",
+        "torch==2.5.1",
         "safetensors>=0.4.0",
         "transformers>=4.40.0",
         "huggingface-hub>=0.22.0",
@@ -90,6 +90,7 @@ def run_benchmarks(
     compare_vllm: bool = False,
     compile_model: bool = False,
     dry_run: bool = False,
+    paged_kv: bool = False,
 ) -> dict:
     """Run ablation + trajectory benchmarks on GPU. Returns combined results dict."""
     import subprocess
