@@ -86,16 +86,21 @@
 ### Plot 1: `ablation_latency.png` (~45 seconds)
 
 > "Here's the ablation. Six scheduling modes, same 100-request agent workload on a
-> real Llama 3.2-1B on an NVIDIA A10G GPU.
+> real Llama 3.2-1B on an NVIDIA A10G GPU with Flash Attention 2.
 >
 > Mode (a) is FIFO — 11.9 seconds mean latency for easy requests. Mode (d), all three
 > policies, cuts that to 8.1 seconds — a 32% reduction, just from scheduling. No model
 > changes, no kernel changes, just a different order of execution.
 >
-> Hard request latency goes up, which is the explicit tradeoff: we're advantaging easy
-> requests because they're blocking dependencies. The agent doesn't care if code
-> generation takes a bit longer — it cares that the five classifiers that are blocking
+> Hard request latency goes up, which is the explicit tradeoff. The agent doesn't care
+> if code generation takes a bit longer — it cares that the five classifiers blocking
 > its next step return fast.
+>
+> One thing worth noting: this 32% improvement is measured at 60% easy requests. I also
+> ran a sweep varying the workload mix. When easy requests are rare — 3% of the workload
+> — the improvement jumps to 78%, because each easy request is blocked behind more hard
+> ones. At 75% easy, it drops to 9%. The scheduling benefit is proportional to how much
+> blockage exists.
 >
 > Mode (e) is something different — I'll come back to it in a minute."
 
