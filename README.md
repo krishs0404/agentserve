@@ -2,6 +2,8 @@
 
 **A custom LLM inference engine built for agents, not chatbots — with scheduling policies that understand the structure of agentic workloads.**
 
+**Project track:** Research | **Course:** CS 194/294 | **GitHub:** https://github.com/krishs0404/agentserve
+
 ---
 
 ## The Problem
@@ -364,3 +366,33 @@ The synthetic workload (60% easy, 25% medium, 15% hard) models general-purpose t
 - **Classifier misses code patches in multi-turn context**: the classifier skips the length threshold for multi-turn prompts, but can't predict when a tool result will trigger a long code patch without session-state features.
 - **Prefix cache hit rate is 0% on synthetic workloads**: synthetic prompts are unique, so no prefix sharing occurs. The 90% hit rate is observed only on real multi-session traces with shared system prompts.
 - **SDPA speedup is within noise for short sequences**: at max_tokens=64 and batch_size=16, the Python scheduler loop is the bottleneck, not the CUDA kernel. The SDPA benefit grows at longer sequence lengths (256+ tokens) where Flash Attention's memory advantage matters.
+
+---
+
+## AI Usage Disclosure
+
+This project was developed with substantial assistance from **Claude Code** (Anthropic's CLI for Claude), used throughout the development process for implementation, debugging, performance optimization, and documentation.
+
+**What Claude Code helped with:**
+- Writing and iterating on engine, scheduler, and model code
+- Debugging GPU OOM errors, Triton compilation issues, and tensor shape mismatches
+- Structuring the Modal benchmark runner and CI scripts
+- Drafting and refining the README and video script
+
+**What was done independently:**
+- Research direction and problem framing (agent scheduling as an underexplored lever)
+- Experimental design: which ablation modes to compare, what metrics matter
+- Interpretation of all results and identification of the key findings
+- Decisions about scope: what to implement vs defer
+- All GPU benchmark runs and result analysis
+
+All code was reviewed and understood before being committed. Commit history reflects the iterative development process.
+
+---
+
+## Citations & References
+
+- **lmcache-agentic-traces dataset**: Shen, S. et al. (2024). LMCache Agentic Dataset Collection. HuggingFace Datasets. https://huggingface.co/datasets/sammshen/lmcache-agentic-traces — used for real agent trace validation and classifier training data.
+- **Llama 3.2-1B-Instruct**: Meta AI. https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct — model weights used for all GPU benchmarks.
+- **vLLM**: Kwon, W. et al. (2023). Efficient Memory Management for Large Language Model Serving with PagedAttention. SOSP 2023. — referenced for comparison and prior art on paged KV caches.
+- **Orca**: Yu, G. et al. (2022). Orca: A Distributed Serving System for Transformer-Based Generative Models. OSDI 2022. — referenced for continuous batching prior art.
