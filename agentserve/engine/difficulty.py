@@ -17,6 +17,7 @@ Levels:
 """
 
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -86,6 +87,10 @@ _HARD_PROMPT_TOKEN_THRESHOLD = 2000
 # Rough word-to-token ratio for the threshold estimate
 _WORDS_PER_TOKEN = 0.75
 
+# Pre-compiled regexes — avoids rebuilding on every classify() call
+_HARD_RE = re.compile("|".join(re.escape(kw) for kw in _HARD_KEYWORDS))
+_EASY_RE = re.compile("|".join(re.escape(kw) for kw in _EASY_KEYWORDS))
+
 
 class RequestDifficultyClassifier:
     """Classifies a prompt string into EASY / MEDIUM / HARD."""
@@ -111,13 +116,11 @@ class RequestDifficultyClassifier:
             if full_tokens > _HARD_PROMPT_TOKEN_THRESHOLD:
                 return Difficulty(DifficultyLevel.HARD, estimated_output_tokens=256, priority=2)
 
-        for kw in _HARD_KEYWORDS:
-            if kw in p:
-                return Difficulty(DifficultyLevel.HARD, estimated_output_tokens=256, priority=2)
+        if _HARD_RE.search(p):
+            return Difficulty(DifficultyLevel.HARD, estimated_output_tokens=256, priority=2)
 
-        for kw in _EASY_KEYWORDS:
-            if kw in p:
-                return Difficulty(DifficultyLevel.EASY, estimated_output_tokens=20, priority=0)
+        if _EASY_RE.search(p):
+            return Difficulty(DifficultyLevel.EASY, estimated_output_tokens=20, priority=0)
 
         if len(classify_window.split()) < 4:
             return Difficulty(DifficultyLevel.EASY, estimated_output_tokens=20, priority=0)

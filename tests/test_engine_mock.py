@@ -209,3 +209,62 @@ class TestStress:
         engine.generate([req])
         assert req.num_output_tokens == 1
         assert req.status == RequestStatus.DONE
+
+
+# ---------------------------------------------------------------------------
+# SDPA / LlamaModel shape validation
+# ---------------------------------------------------------------------------
+
+class TestLlamaModelShapes:
+    """Verify LlamaModel (TinyConfig) produces correct output shapes via SDPA.
+
+    TinyConfig uses 2 layers so this runs fast on CPU.
+    """
+
+    def test_forward_prefill_shapes(self):
+        import torch
+        from agentserve.model.llama import LlamaModel
+        model = LlamaModel(TinyConfig)
+        token_ids = [1, 2, 3, 4, 5]
+        logits, kv_cache = model.forward(token_ids)
+        assert logits.shape == (len(token_ids), TinyConfig.vocab_size)
+        assert len(kv_cache) == TinyConfig.n_layers
+        k, v = kv_cache[0]
+        assert k.shape[0] == len(token_ids)
+        assert k.shape[1] == TinyConfig.n_kv_heads
+        assert k.shape[2] == TinyConfig.head_dim
+
+    def test_forward_decode_batch_shapes(self):
+        import torch
+        from agentserve.model.llama import LlamaModel
+        model = LlamaModel(TinyConfig)
+        B = 3
+        # Different sequence lengths exercises the vectorised padding mask path
+        seq_lens = [4, 6, 5]
+        Kh, D = TinyConfig.n_kv_heads, TinyConfig.head_dim
+        kv_caches = [
+            [(torch.zeros(L, Kh, D), torch.zeros(L, Kh, D))
+             for _ in range(TinyConfig.n_layers)]
+            for L in seq_lens
+        ]
+        logits, new_kvs = model.forward_decode_batch([1, 2, 3], kv_caches, seq_lens[:])
+        assert logits.shape == (B, TinyConfig.vocab_size)
+        assert len(new_kvs) == B
+        for b, (orig_len, req_kvs) in enumerate(zip(seq_lens, new_kvs)):
+            k, v = req_kvs[0]
+            assert k.shape[0] == orig_len + 1, f"req {b}: expected {orig_len+1}, got {k.shape[0]}"
+
+    def test_forward_decode_batch_uniform_lengths(self):
+        """Uniform seq_lens — no padding mask needed. Should still succeed."""
+        import torch
+        from agentserve.model.llama import LlamaModel
+        model = LlamaModel(TinyConfig)
+        B, L = 2, 5
+        Kh, D = TinyConfig.n_kv_heads, TinyConfig.head_dim
+        kv_caches = [
+            [(torch.zeros(L, Kh, D), torch.zeros(L, Kh, D))
+             for _ in range(TinyConfig.n_layers)]
+            for _ in range(B)
+        ]
+        logits, _ = model.forward_decode_batch([1, 2], kv_caches, [L, L])
+        assert logits.shape == (B, TinyConfig.vocab_size)

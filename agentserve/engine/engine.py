@@ -309,8 +309,8 @@ class Engine:
             kv_for_cache = None
             if req.kv_cache is not None:
                 kv_for_cache = [
-                    (req.kv_cache[i][0][:complete_blocks_len].detach().clone(),
-                     req.kv_cache[i][1][:complete_blocks_len].detach().clone())
+                    (req.kv_cache[i][0][:complete_blocks_len].clone(),
+                     req.kv_cache[i][1][:complete_blocks_len].clone())
                     for i in range(len(req.kv_cache))
                 ]
             self.prefix_cache.store(req.token_ids[:complete_blocks_len], block_ids, kv_for_cache)

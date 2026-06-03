@@ -293,8 +293,8 @@ notes/
 
 ## Design Decisions
 
-**Why hand-written attention instead of FlashAttention?**
-The goal was to understand every layer of the stack. The forward pass is standard PyTorch matmuls in fp16. Production throughput would come from a FlashAttention or Triton kernel; the scheduling policies sit above that layer and are independent of it.
+**Attention implementation: `F.scaled_dot_product_attention` (Flash Attention 2)**
+Both attention paths use PyTorch's SDPA, which automatically dispatches to Flash Attention 2 on CUDA with PyTorch 2.4+. This gives production-grade efficiency with no custom kernel code. The causal mask and GQA expansion are handled in PyTorch; SDPA fuses the softmax and matmuls into a single GPU kernel. The scheduling policies sit above the attention layer and are independent of it — any future kernel upgrade (Triton, cuDNN, etc.) does not change the scheduling architecture.
 
 **Why a heuristic classifier rather than a purely learned one?**
 The classifier runs synchronously before scheduling and must add zero latency. The keyword heuristic takes microseconds. The learned predictor (`length_predictor.py`) is complementary: it provides continuous estimates for the relative-batching mode, and improves with every completion via online SGD. The heuristic remains the primary scheduler signal.

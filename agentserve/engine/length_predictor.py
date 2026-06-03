@@ -42,11 +42,12 @@ def featurize(prompt: str) -> dict[str, float]:
     window = prompt[-800:] if len(prompt) > 800 else prompt
     p = window.lower()
 
-    words = window.split()
-    n_words = max(len(words), 1)
+    full_words  = prompt.split()      # full length used for prefill cost signal
+    words       = window.split()      # tail window used for difficulty signals
+    n_words     = max(len(words), 1)
 
     return {
-        "log_prompt_len":  math.log1p(len(prompt.split())),   # full length for prefill cost
+        "log_prompt_len":  math.log1p(len(full_words)),
         "has_code":        float(any(kw in p for kw in _CODE_KW)),
         "has_explain":     float(any(kw in p for kw in _EXPLAIN_KW)),
         "has_list":        float(any(kw in p for kw in _LIST_KW)),

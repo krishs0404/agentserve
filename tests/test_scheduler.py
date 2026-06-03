@@ -334,3 +334,46 @@ class TestAgentAwareVsBaseline:
         # Hard arrived first and should complete first (batch_size=1, strict FIFO)
         if len(completed) >= 2:
             assert completed[0].priority == 2  # hard was first
+
+
+# ---------------------------------------------------------------------------
+# Relative batching: variance minimization
+# ---------------------------------------------------------------------------
+
+class TestRelativeBatching:
+    def _make_req(self, predicted_len: int) -> Request:
+        req = Request(prompt="test", token_ids=[1, 2, 3], max_tokens=predicted_len)
+        req.estimated_output_tokens = predicted_len
+        req.priority = 1
+        req.difficulty = "medium"
+        return req
+
+    def test_selects_minimum_variance_window(self):
+        """_select_by_similarity picks the tightest cluster, not the front of the list."""
+        import statistics
+        sched = Scheduler(max_batch_size=8, use_combined_batching=True)
+        # [10, 100, 200, 201, 202]: window [200, 201, 202] has variance ~1 — far tighter
+        # than any window that includes 10 or 100.
+        reqs = [self._make_req(l) for l in [10, 100, 200, 201, 202]]
+        selected = sched._select_by_similarity(reqs, n=3)
+        selected_lens = sorted(r.estimated_output_tokens for r in selected)
+        # Verify variance of selected window is below any cross-cluster window
+        assert statistics.variance(selected_lens) < statistics.variance([10, 100, 200])
+        assert selected_lens == [200, 201, 202]
+
+    def test_returns_all_when_n_ge_len(self):
+        reqs = [self._make_req(l) for l in [50, 100, 150]]
+        sched = Scheduler(max_batch_size=8, use_combined_batching=True)
+        selected = sched._select_by_similarity(reqs, n=5)
+        assert len(selected) == 3  # returns all when n >= len
+
+    def test_relative_mode_engine_completes_all(self):
+        """Relative batching mode still completes all requests."""
+        from agentserve.engine.engine import Engine
+        from agentserve.model.config import TinyConfig
+        engine = Engine(config=TinyConfig, use_mock=True, agent_aware=True,
+                        use_relative_batching=True, max_batch_size=4)
+        reqs = [Request(prompt="p", token_ids=[1, 2], max_tokens=t)
+                for t in [5, 10, 50, 5, 10, 50]]
+        completed = engine.generate(reqs)
+        assert len(completed) == 6

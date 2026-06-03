@@ -346,14 +346,17 @@ class LlamaModel(nn.Module):
             k_4d = k_exp.transpose(1, 2)            # [B, H, total_len, D]
             v_4d = v_exp.transpose(1, 2)            # [B, H, total_len, D]
 
-            # Build padding mask so shorter sequences don't attend to pad positions
+            # Build padding mask so shorter sequences don't attend to pad positions.
+            # Vectorized: no Python loop over batch elements.
             attn_mask = None
             min_len = min(seq_lens)
             if min_len < max_len:
+                seq_lens_t = torch.tensor(seq_lens, device=x.device)  # [B]
+                col = torch.arange(total_len, device=x.device)         # [total_len]
+                # True at pad columns: past the sequence's own history but before max_len
+                is_pad = (col[None, :] >= seq_lens_t[:, None]) & (col[None, :] < max_len)
                 attn_mask = x.new_zeros(B, 1, 1, total_len)
-                for b in range(B):
-                    if seq_lens[b] < max_len:
-                        attn_mask[b, 0, 0, seq_lens[b]:max_len] = float("-inf")
+                attn_mask.masked_fill_(is_pad[:, None, None, :], float("-inf"))
 
             # Flash Attention via PyTorch SDPA
             out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=attn_mask)  # [B, H, 1, D]
@@ -364,13 +367,10 @@ class LlamaModel(nn.Module):
             x = x + attn_out
             x = x + layer.ffn(layer.ffn_norm(x))
 
-            # Save unpadded KV for each request
+            # Save unpadded KV for each request (.detach() redundant in inference_mode)
             for b in range(B):
                 L = seq_lens[b]
-                new_kv_caches[b].append((
-                    k_full[b, :L + 1].detach(),
-                    v_full[b, :L + 1].detach(),
-                ))
+                new_kv_caches[b].append((k_full[b, :L + 1], v_full[b, :L + 1]))
 
         x = self.norm(x)           # [B, hidden_dim]
         logits = self.lm_head(x)   # [B, vocab_size]
