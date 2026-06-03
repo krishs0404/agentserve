@@ -128,8 +128,11 @@ class Engine:
             self.model = self.model.to(device)
             self.model.eval()
             if compile_model and torch.cuda.is_available():
-                # torch.compile with dynamic=True handles variable prefill lengths
-                # without recompilation. reduce-overhead minimises kernel launch cost.
+                # torch.compile requires PyTorch >= 2.5. On 2.4, Triton 3.0.0 has a
+                # bug with the RoPE theta**tensor expression — suppress_errors lets it
+                # fall back to eager mode transparently instead of crashing.
+                import torch._dynamo
+                torch._dynamo.config.suppress_errors = True
                 self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
 
         # Scheduler: agent-aware or plain FIFO baseline

@@ -361,11 +361,16 @@ def main():
         shared_model = LlamaModel(config)
         load_weights(shared_model, args.model_dir)
         shared_model = shared_model.to("cuda").eval()
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
         shared_model = torch.compile(shared_model, mode="reduce-overhead", dynamic=True)
-        # Warm up: run one prefill to trigger JIT before timing
-        _dummy = [1, 2, 3, 4, 5]
-        shared_model.forward(_dummy)
-        print("  Compilation complete.")
+        # Warmup: trigger JIT before timing; suppress compile errors (needs PyTorch >= 2.5)
+        try:
+            shared_model.forward([1, 2, 3, 4, 5])
+            print("  Compilation complete.")
+        except Exception as e:
+            print(f"  WARNING: torch.compile warmup failed ({type(e).__name__}). "
+                  f"Requires PyTorch >= 2.5; falling back to eager SDPA.")
 
     # (label, priority, overflow, preemption, relative_batching, combined_batching)
     modes = [
