@@ -86,6 +86,15 @@ Mode (f) matches priority mode on easy latency (8.09 s, same as modes b–d) but
 
 **The practical takeaway:** these are complementary mechanisms, not substitutes. For heterogeneous agent workloads where easy latency is the bottleneck, use mode (d). For workloads where the difficulty distribution is relatively uniform (like SWE-bench: 0% easy, 60% medium, 40% hard), use mode (e).
 
+### Scheduling benefit grows with sequence length
+
+At max_tokens=256 (longer agent responses), priority scheduling cuts easy latency **41%** vs 32% at max_tokens=64. Hard requests occupy batch slots 4× longer at longer sequences, so easy requests accumulate more blockage in FIFO — priority scheduling relieves proportionally more. Relative batching weakens at smaller batch sizes (fewer candidates for the sliding window).
+
+| max_tokens | batch | Easy improvement (mode c) | Hard penalty (mode c) |
+|---|---|---|---|
+| 64 | 16 | −32% | +75% |
+| 256 | 4 | **−41%** | +96% |
+
 ### Trajectory completion time
 
 20 trajectories per template, all competing simultaneously. TCT = wall time from first step submission to last step completion.

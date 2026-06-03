@@ -121,7 +121,24 @@ Real production code agents have almost no easy requests — they're dominated b
 
 ---
 
-## 9. SDPA / Flash Attention 2 Impact
+## 9. Scheduling Benefit Grows with Sequence Length
+
+Comparison at max_tokens=64 (batch=16) vs max_tokens=256 (batch=4):
+
+| Mode | Easy improvement (64) | Easy improvement (256) |
+|---|---|---|
+| (b) Priority only | −33% | −35% |
+| (c) Priority + Overflow | −32% | **−41%** |
+| (d) All 3 Policies | −32% | −39% |
+| (e) Relative Batching | −3% | +2% (worse) |
+
+At max_tokens=256, priority scheduling cuts easy latency **41%** vs 32% at max_tokens=64. The reason: hard requests occupy batch slots for 4× longer at longer sequences, so easy requests accumulate more blockage in FIFO. Priority scheduling relieves proportionally more blockage.
+
+Relative batching weakens at batch=4 — the sliding window has fewer candidates to optimize, and there are fewer opportunities to group similar-length requests.
+
+**Practical implication**: priority scheduling is most valuable for long-context agent workloads (tool results with large context windows, multi-turn code review). The benefit compounds with sequence length.
+
+## 10. SDPA / Flash Attention 2 Impact
 
 Throughput comparison before/after SDPA at max_tokens=64:
 
