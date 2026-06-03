@@ -141,6 +141,7 @@ def run_mode(
     enable_preemption: bool,
     use_relative_batching: bool = False,
     use_combined_batching: bool = False,
+    compile_model: bool = False,
 ) -> dict:
     engine = Engine(
         config=config,
@@ -155,6 +156,7 @@ def run_mode(
         enable_preemption=enable_preemption,
         use_relative_batching=use_relative_batching,
         use_combined_batching=use_combined_batching,
+        compile_model=compile_model,
     )
 
     # Re-create requests for this run (fresh state)
@@ -309,6 +311,8 @@ def main():
     p.add_argument("--max-batch",    type=int,  default=16)
     p.add_argument("--compare-vllm", action="store_true", default=False,
                    help="Also benchmark vLLM on the same workload (requires vLLM installed)")
+    p.add_argument("--compile", action="store_true", default=False,
+                   help="Wrap model with torch.compile (CUDA only, adds ~30s warmup)")
     p.add_argument("--output-json",  default=None,
                    help="Write raw results to a JSON file")
     args = p.parse_args()
@@ -357,7 +361,7 @@ def main():
         print(f"  Running {label}...")
         r = run_mode(label, enable_priority=pri, enable_overflow=ovf,
                      enable_preemption=pre, use_relative_batching=rel,
-                     use_combined_batching=comb, **common)
+                     use_combined_batching=comb, compile_model=args.compile, **common)
         results.append(r)
         print(f"    wall={r['wall_s']:.2f}s  tps={r['throughput_tps']:.1f}  "
               f"easy_lat={r['easy_mean_lat_s']:.3f}s  hard_lat={r['hard_mean_lat_s']:.3f}s")

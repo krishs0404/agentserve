@@ -97,6 +97,7 @@ class Engine:
         scheduler_policy: Optional[SchedulerPolicy] = None,
         use_relative_batching: bool = False,
         use_combined_batching: bool = False,
+        compile_model: bool = False,
     ):
         self.config = config
         self.eos_token_id = eos_token_id
@@ -120,6 +121,10 @@ class Engine:
                 load_weights(self.model, model_dir)
             self.model = self.model.to(device)
             self.model.eval()
+            if compile_model and torch.cuda.is_available():
+                # torch.compile with dynamic=True handles variable prefill lengths
+                # without recompilation. reduce-overhead minimises kernel launch cost.
+                self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
 
         # Scheduler: agent-aware or plain FIFO baseline
         self.scheduler = Scheduler(

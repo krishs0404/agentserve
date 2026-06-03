@@ -88,6 +88,7 @@ def run_benchmarks(
     max_batch: int = 16,
     n_traj: int = 20,
     compare_vllm: bool = False,
+    compile_model: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """Run ablation + trajectory benchmarks on GPU. Returns combined results dict."""
@@ -148,6 +149,8 @@ def run_benchmarks(
     ]
     if compare_vllm:
         ablation_cmd.append("--compare-vllm")
+    if compile_model:
+        ablation_cmd.append("--compile")
 
     subprocess.run(ablation_cmd)
 
@@ -195,6 +198,7 @@ def main(
     max_batch: int = 16,
     n_traj: int = 20,
     compare_vllm: bool = False,
+    compile_model: bool = False,
 ):
     """
     Launch AgentServe benchmarks on Modal A10G.
@@ -217,6 +221,7 @@ def main(
         max_batch=max_batch,
         n_traj=n_traj,
         compare_vllm=compare_vllm,
+        compile_model=compile_model,
         dry_run=dry_run,
     )
 
