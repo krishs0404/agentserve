@@ -1,202 +1,191 @@
 # AgentServe — Video Script
 
-**Format**: Screen recording, ~8 minutes. Research talk style.  
-**Visuals**: Terminal + 4 plots from `notes/plots/`. Run `demo.py` live for ~30 seconds.  
-**Tone**: Explain the *why* before the *how*. No product hype.
+**Format**: Screen recording, ~8 minutes. Research talk style.
+**Visuals**: Terminal showing code structure + 4 plots. No live demo.
+**Tone**: Lead with the problem, explain the insight, show the numbers, be honest about tradeoffs.
 
 ---
 
 ## [0:00–0:45] Hook — The Problem Nobody Talks About
 
-*Show: blank terminal or GitHub README in browser*
+*Show: GitHub README or the agentserve/ directory in terminal*
 
-> "When people talk about making LLMs faster, they talk about FlashAttention, CUDA
-> graphs, quantization. But there's a layer nobody talks about: scheduling. Who runs
-> next? In what order? When does a request get its batch slot?
+> "When people talk about making LLMs faster, they talk about FlashAttention, quantization,
+> better kernels. But there's a layer nobody talks about: scheduling. Who runs next? In what
+> order? When does a request get its batch slot?
 >
-> For a chatbot, this doesn't matter much. Requests look the same — one user, one
-> response, done. But for an agent — a system running dozens of LLM calls to complete
-> a task — it matters enormously. Here's why.
+> For a chatbot, this doesn't matter much. Every request looks the same — one user, one
+> response, done. But for an AI agent — a system that fires dozens of LLM calls to complete
+> a task — it matters a lot.
 >
-> When an agent fires tool calls, it fires them in bursts. Five classification calls,
-> two extraction calls, one code generation call — all at once. The classify calls take
-> 20 tokens each. The code generation takes 800 tokens. In a standard FIFO queue, the
-> five classifiers sit blocked behind the code generator. But those classifiers are
-> blocking dependencies — the agent literally cannot take its next step until all five
-> come back. So your code generator occupies the batch for 12 seconds while the agent
-> stalls."
+> Here's why. When an agent calls tools, it fires them in bursts. Five classification calls,
+> two extraction calls, one code generation call — all at once. The classifiers take 20 tokens.
+> The code generation takes 800. In a FIFO queue, all five classifiers sit blocked behind the
+> code generator. But those classifiers are blocking dependencies — the agent cannot take its
+> next step until all five return. So the code generator occupies the batch for seconds while
+> the agent stalls waiting for answers it could have had immediately.
+>
+> That's the problem. AgentServe fixes it."
 
 ---
 
-## [0:45–2:00] What AgentServe Is
+## [0:45–2:15] What AgentServe Is
 
-*Show: `ls agentserve/engine/` in terminal, then talk through the layers*
+*Show: `ls agentserve/engine/` in terminal*
 
-> "AgentServe is a custom inference engine built around this insight. It's a
-> hand-written Llama 3.2 implementation — attention, paged KV cache, continuous
-> batching — layered with scheduling policies that understand agent workload structure.
+> "AgentServe is a hand-written Llama 3.2 inference engine with scheduling policies that
+> understand agent workload structure. It implements Flash Attention 2 via PyTorch SDPA,
+> a paged KV cache, continuous batching, and prefix caching — and layers agent-aware
+> scheduling on top of all of it.
 >
-> Three layers work together. First: a difficulty classifier. Every prompt gets
-> classified in under a millisecond — easy, medium, or hard — based on keyword
-> analysis and output-length prediction. The classifier detects multi-turn
-> conversations and focuses on the tail of the prompt where the current instruction
-> lives, not the accumulated history.
+> Three scheduling layers work together.
 >
-> Second: the scheduler. Instead of one FIFO queue, there are three O(1) deques —
-> one per difficulty level. Easy requests always drain first. Two additional policies
-> layer on top: soft overflow admits extra easy requests beyond the normal batch cap,
-> and preemption evicts the youngest hard request if an easy one has been waiting too
-> long.
+> First: a difficulty classifier. Every incoming prompt gets tagged easy, medium, or hard
+> in under a millisecond. The classifier looks at the tail of the prompt — the current
+> instruction — not the full accumulated conversation history. It detects multi-turn format
+> automatically: a 20,000-token SWE-bench context doesn't count as 'hard' just because it's
+> long; what matters is what the model is being asked to do right now.
 >
-> Third: trajectory-aware policies. For multi-step agent workflows — ReAct loops,
-> plan-execute chains — two plug-in policies schedule at the session level, not just
-> the request level. I'll come back to those when I show the results."
+> Second: the scheduler. Instead of one FIFO queue, three O(1) deques — one per difficulty
+> level. Easy always drains first. Two additional policies layer on: soft overflow admits
+> extra easy requests past the normal batch cap since they exit fast, and preemption evicts
+> the youngest hard request when an easy one has been waiting too long.
+>
+> Third: trajectory-aware policies. These schedule at the session level, not the request
+> level. For multi-step agent workflows — ReAct loops, plan-execute chains — the scheduler
+> needs to understand that steps within a trajectory have sequential dependencies. I'll show
+> why this matters when I get to the results.
+>
+> Six scheduling modes total, from plain FIFO to a relative batching approach that groups
+> requests by predicted output length instead of by difficulty bin. Let me show you what
+> these actually do."
 
 ---
 
-## [2:00–2:30] Architecture Walkthrough
+## [2:15–5:00] Results
 
-*Show: `ls agentserve/engine/` in terminal or a simple ASCII diagram*
+*Open `notes/plots/` — have all four plots ready to switch between*
 
-> "Here's the engine structure. The entry point is `engine.py`, which ties three
-> layers together.
->
-> Layer one: the difficulty classifier in `difficulty.py`. Inspects the tail of
-> the prompt for keywords. Tags each request easy, medium, or hard in under a
-> millisecond. Detects multi-turn conversation format and focuses on the most recent
-> instruction, not the full accumulated history.
->
-> Layer two: the scheduler in `scheduler.py`. Six modes. The simplest is three O(1)
-> FIFO deques — one per difficulty level. Easy drains first. Soft overflow admits extra
-> easy requests past the batch cap. Preemption evicts the youngest hard request when
-> an easy one has waited too long. For specialized workloads, a sliding-window
-> relative batching mode groups requests by predicted output length instead of by
-> difficulty bin.
->
-> Layer three: pluggable trajectory policies in `policies.py`. Two methods — priority
-> key and on-complete. Drop in any policy object; the scheduling loop doesn't change.
-> I'll show why this design matters when I get to the trajectory results."
+### Plot 1: `ablation_latency.png` (~50 seconds)
 
----
-
-## [2:30–5:00] Results
-
-*Open `notes/plots/`. Walk through in order.*
-
-### Plot 1: `ablation_latency.png` (~45 seconds)
-
-> "Here's the ablation. Six scheduling modes, same 100-request agent workload on a
-> real Llama 3.2-1B on an NVIDIA A10G GPU with Flash Attention 2.
+> "Here's the ablation. Six modes, same 100-request heterogeneous agent workload — 64%
+> classification and extraction calls, 27% summaries, 9% code generation — running on
+> Llama 3.2-1B on an NVIDIA A10G with Flash Attention 2.
 >
-> Mode (a) is FIFO — 11.9 seconds mean latency for easy requests. Mode (d), all three
-> policies, cuts that to 8.1 seconds — a 32% reduction, just from scheduling. No model
-> changes, no kernel changes, just a different order of execution.
+> Mode (a) is FIFO: 11.9 seconds mean latency for easy requests. Mode (d), all three
+> scheduling policies together, cuts that to 8.1 seconds — a 32% reduction with zero
+> model changes, zero kernel changes, just a different order of execution.
 >
-> Hard request latency goes up, which is the explicit tradeoff. The agent doesn't care
-> if code generation takes a bit longer — it cares that the five classifiers blocking
-> its next step return fast.
+> Hard request latency goes up, and that's the explicit tradeoff. The agent doesn't care
+> if code generation takes a bit longer. It cares that the five classifiers blocking its
+> next action return fast.
 >
-> One thing worth noting: this 32% improvement is measured at 60% easy requests. I also
-> ran a sweep varying the workload mix. When easy requests are rare — 3% of the workload
-> — the improvement jumps to 78%, because each easy request is blocked behind more hard
-> ones. At 75% easy, it drops to 9%. The scheduling benefit is proportional to how much
-> blockage exists.
+> One thing I want to highlight: this 32% improvement is at 60% easy requests. I also
+> swept the workload mix. When easy requests are only 3% of traffic — which is closer to
+> what real SWE-bench sessions look like — the improvement jumps to 78%, because each
+> easy request is stuck behind far more hard ones. At 75% easy, it drops to 9%. The
+> scheduling benefit scales with how much blockage exists.
 >
-> Mode (e) is something different — I'll come back to it in a minute."
+> Mode (e) makes a different tradeoff — I'll come back to it."
 
 ### Plot 2: `trajectory_speedup.png` (~60 seconds)
 
-> "The more interesting result is this one. Here I'm measuring trajectory completion
-> time — the wall-clock time from when an agent starts a multi-step task to when it
-> finishes. Each trajectory is 3-4 sequential LLM calls with real step dependencies.
+> "The more important result is this one. I'm now measuring trajectory completion time —
+> wall-clock time from when an agent starts a multi-step task to when it finishes. Each
+> trajectory is 3 or 4 sequential LLM calls with real step dependencies.
 >
-> Plain priority scheduling — mode (b) — does almost nothing. Zero improvement on
-> ReAct, slightly negative on Plan-Execute. That's the key finding: per-request
-> latency improvement doesn't translate to trajectory completion time if you don't
-> understand the step dependencies. Scheduling individual requests faster doesn't help
-> if you're not coordinating across the steps of the same task.
+> Look at the priority scheduling bar — mode (b). Zero improvement on ReAct. Slightly
+> negative on Plan-Execute. That's the key finding of this project: per-request latency
+> improvement does not translate to trajectory completion time when you don't understand
+> the step dependencies. Making individual requests faster doesn't help if you're not
+> coordinating across the steps of the same session.
 >
-> The trajectory-aware policies do. TrajectoryProgress — which prioritizes sessions
-> past their midpoint — cuts ReAct completion time 6x. 100 seconds down to 17 seconds.
-> TrajectoryDeadline — which scores by urgency — cuts Plan-Execute 2.6x. A 4-step
-> pipeline that used to take 2.5 minutes now finishes in 60 seconds."
+> The trajectory-aware policies do. TrajectoryProgress, which prioritizes sessions past
+> their midpoint, cuts ReAct completion time 6x — from 100 seconds down to 17 seconds.
+> TrajectoryDeadline, which scores by urgency using remaining work divided by time
+> remaining, cuts Plan-Execute 2.6x — a 2.5-minute pipeline down to 60 seconds.
+>
+> Which policy wins depends on the session structure: TrajectoryProgress is better for
+> short uniform-step chains, TrajectoryDeadline is better for longer chains where early
+> steps are expensive and urgency builds. The average speedup across all templates is
+> 2.7x for TrajectoryDeadline, 2.5x for TrajectoryProgress. Priority alone: 0.99x."
 
 ### Plot 3: `sensitivity_sweep.png` (~30 seconds)
 
-> "One concern with a classifier-based system is: what happens when the classifier
-> is wrong? I injected random noise — flipping labels to the wrong bucket at various
-> rates.
+> "One natural concern: this system relies on a classifier. What happens when the
+> classifier is wrong?
 >
-> At 0% noise, the scheduling benefit is 66%. At 50% noise — when half of all requests
-> are randomly misclassified — the benefit is still 66%. The scheduling policy is
-> robust to classifier errors because the benefit comes from statistical separation,
-> not perfect classification. A majority of requests in the right bucket is sufficient."
+> I ran a sweep injecting random label noise — flipping requests to the wrong bucket
+> at increasing rates. At 0% noise, the scheduling benefit is 66%. At 50% noise — half
+> of all labels randomly wrong — the benefit is still 65%. It barely moves.
+>
+> The reason: scheduling works through statistical separation, not perfect classification.
+> A majority of requests in the right bucket is sufficient. The scheduler doesn't need
+> to know exactly which requests are easy; it needs enough of them to flow through first."
 
-### Plot 4: `latency_cdf.png` (~30 seconds)
+### Plot 4: `latency_cdf.png` (~25 seconds)
 
-> "And the CDF shows it's not just the mean that shifts — the whole distribution
-> moves. FIFO has a long tail of easy requests taking 15-19 seconds. With all three
-> policies, the 95th percentile drops to 14 seconds. Easy requests escape faster
-> across the entire distribution."
+> "The CDF shows it's not just the mean that improves — the whole distribution shifts.
+> FIFO has a long tail of easy requests taking 15 to 19 seconds. With all three policies,
+> the P95 drops from 19 seconds to 14 seconds. Easy requests escape faster across the
+> entire distribution, not just on average."
 
 ---
 
 ## [5:00–6:15] The Novel Finding — Relative Batching
 
-*Show ablation_latency.png, point to mode (e) and (f) columns*
+*Point to mode (e) on the ablation plot*
 
-> "Now let me come back to mode (e). This was the most interesting result.
+> "Let me come back to mode (e). This was the result I didn't expect.
 >
-> The insight is about GPU efficiency. Our decode step pads all KV caches in the batch
-> to the length of the longest sequence. If you pair a 15-token easy request with a
-> 400-token hard request, you're running a matrix multiply of size 400 for the short
-> request — 97% waste. The short request finishes in 15 steps; the remaining 385 steps
-> just waste its slot.
+> The motivation is GPU efficiency. Our decode step pads all KV caches in the batch to
+> the length of the longest sequence. If you pair a 15-token easy request with a 400-token
+> hard request, you're running the full attention computation for 400 positions for both —
+> 97% wasted compute for the short one.
 >
-> So I built a sliding window scheduler. Instead of three fixed bins, you predict a
-> continuous output length for each request using an online linear model that updates
-> after every completion. The scheduler picks whichever group of pending requests has
-> the smallest variance in predicted length. Requests that will finish at the same
-> time go in together.
+> So I built a sliding window scheduler. Instead of three fixed difficulty bins, an online
+> linear model predicts the expected output length for each request and updates its weights
+> after every completion. The scheduler then picks whichever window of pending requests has
+> the smallest variance in predicted length — requests that will finish at roughly the same
+> time go into the batch together.
 >
-> The result was a surprise. Easy latency barely moves — only 3% better than FIFO. But
-> hard latency actually improves 9% versus FIFO. Relative batching makes a completely
-> different tradeoff than priority scheduling: instead of picking a winner and loser,
-> it reduces padding waste uniformly.
+> The result: easy latency barely moves, only 3% better than FIFO. But hard latency
+> actually improves 9%. Relative batching makes a balanced tradeoff — no winner, no loser,
+> it reduces padding waste uniformly across difficulty classes.
 >
-> Mode (f) tried to combine both — priority ordering between tiers, relative batching
-> within each tier. Easy latency matched the priority modes, but hard latency didn't
-> recover. The reason: the benefit of relative batching comes from grouping across the
-> easy/hard boundary. Priority ordering prevents that by design.
+> Mode (f) tried to combine priority ordering with relative batching within each tier.
+> Easy latency matched the priority modes, but hard latency stayed penalized. The reason:
+> the benefit of relative batching comes specifically from grouping across the easy-hard
+> boundary. Priority ordering prevents that by design. They're complementary mechanisms,
+> not additive ones.
 >
-> These aren't substitutes. Priority scheduling is right for heterogeneous workloads
-> where easy latency is the bottleneck. Relative batching is right for specialized
-> workloads — like SWE-bench — where nearly all requests are medium or hard, so there
-> are no easy requests to promote."
+> The practical implication: priority scheduling is right when you have heterogeneous
+> traffic and easy latency is the bottleneck. Relative batching is right for specialized
+> workloads — like code debugging agents — where nearly all requests are medium or hard
+> and there are no easy requests to promote."
 
 ---
 
-## [6:15–7:15] Real Data — Not Just Synthetic
+## [6:15–7:15] Real Data Validation
 
-> "Everything so far was on a synthetic workload I designed with the right distribution
-> to make scheduling differences visible. I wanted to check whether real production
-> traffic looked similar.
+> "Everything so far is on a synthetic workload I designed. I wanted to check whether
+> real production traffic looked similar, so I integrated the lmcache-agentic-traces
+> dataset — 787 real multi-turn agent sessions from SWE-bench, GAIA, and WildClaw, with
+> 24,000 LLM iterations and ground-truth output lengths.
 >
-> I integrated the lmcache-agentic-traces dataset — 787 multi-turn agent sessions from
-> real SWE-bench, GAIA, and WildClaw agent runs, with 24,000 LLM iterations and
-> ground-truth output lengths.
+> Two findings. First, real workloads look nothing like my synthetic benchmark. My
+> synthetic is 60% easy, 25% medium, 15% hard. SWE-bench is 0% easy, 60% medium, 40%
+> hard — almost no short classification calls, just code-debugging tool calls at every
+> turn. The scheduler that's optimal for a general-purpose assistant is not optimal for
+> a code agent. For SWE-bench, priority scheduling provides zero benefit because there
+> are no easy requests to promote. The right lever there is trajectory-aware scheduling
+> and prefix caching.
 >
-> Two findings. First: real workloads look nothing like my synthetic benchmark. My
-> synthetic was 60% easy, 25% medium, 15% hard. SWE-bench is 0% easy, 60% medium,
-> 40% hard. Almost no short classification calls — just code-debugging tool calls at
-> every turn. The scheduler that's right for a general-purpose agent isn't the same
-> one that's right for a code agent.
->
-> Second: 669 SWE-bench sessions all share the same 14,000-token system prompt. I
-> replayed those sessions through the engine. The prefix KV cache achieved a 90% hit
-> rate — almost every session skipped recomputing that system prompt entirely. On
-> synthetic workloads where all prompts are unique, hit rate is 0%. Real deployments
-> have massive prefix-sharing opportunities that synthetic benchmarks miss entirely."
+> Second: 669 of those SWE-bench sessions all share the same 14,000-token system prompt.
+> I replayed them through the engine. The prefix KV cache achieved a 90% hit rate —
+> nearly every session skipped recomputing attention over that system prompt entirely. On
+> synthetic workloads with unique prompts, the hit rate is 0%. Real agent deployments have
+> massive prefix-sharing opportunities that synthetic benchmarks completely miss."
 
 ---
 
@@ -205,43 +194,49 @@
 > "Three directions I'd pursue next.
 >
 > First: a session-state classifier. The current classifier looks at the tail of the
-> prompt — the most recent instruction. But it can't predict when a tool result will
-> trigger a long code patch, because that depends on where the agent is in its task:
-> has it found the root cause? Is it ready to write? A classifier with features like
-> turn number, recent error signals, and intermediate output lengths would close this
-> gap.
+> current prompt — the most recent instruction. It can't predict when a tool result will
+> trigger a long code patch, because that requires knowing where the agent is in its task:
+> has it found the root cause, is it ready to synthesize a fix? Features like turn number,
+> recent error signals, and output length history from the same session would close this
+> gap. This is what I found when I trained the classifier on 24,000 real SWE-bench
+> iterations — it underperformed keywords because it lacks that cross-turn context.
 >
-> Second: workload-adaptive scheduling. Right now you pick a scheduling mode and run
-> with it. A production system serving mixed traffic — some code agents, some research
-> agents, some general assistants — should detect the workload distribution and switch
-> policies automatically. The difficulty distribution of arriving requests is a real-
-> time signal you can use.
+> Second: workload-adaptive policy selection. Right now you pick a scheduling mode before
+> the workload starts. A production system serving mixed traffic — code agents, research
+> agents, general assistants — should detect the request distribution in real time and
+> switch policies automatically. The difficulty distribution of arriving requests is a
+> live signal you can use.
 >
-> Third: FlashAttention integration. The scheduling improvements — 32% easy-latency
-> reduction, 6x trajectory speedup — are orthogonal to kernel throughput. This engine
-> runs hand-written PyTorch attention, which is about 16x slower than vLLM on raw
-> throughput. Stack these scheduling policies on top of production kernels and the
-> relative gains are the same.
+> Third: full variable-length paged attention. The current implementation stores KV tensors
+> in a pre-allocated pool with block tables, eliminating per-step Python allocation. But
+> the attention step still pads to the longest sequence. A custom Triton kernel using the
+> block tables directly would eliminate that padding entirely — the remaining gap between
+> this engine and vLLM's throughput.
 >
-> The core argument of this project is simple: LLM inference for agents is not the
-> same problem as LLM inference for chatbots. The workload structure is different —
-> heterogeneous bursts, DAG dependencies, multi-step sessions — and the scheduler
-> should reflect that. A 6x trajectory speedup with zero model changes makes the case
-> that scheduling is an underexplored lever."
+> The core argument: LLM inference for agents is a different problem from LLM inference
+> for chatbots. Heterogeneous request bursts, DAG dependencies between calls, multi-step
+> session structure — these properties don't exist in chatbot traffic, and standard
+> schedulers don't account for them. A 6x trajectory speedup with zero model changes is
+> the evidence that scheduling is an underexplored lever."
 
 ---
 
 ## Recording Checklist
 
 Before recording:
-- [ ] `uv run pytest tests/ -q` passes (84 tests)
-- [ ] `uv run python scripts/demo.py` renders the side-by-side display
-- [ ] `notes/plots/ablation_latency.png`, `trajectory_speedup.png`, `sensitivity_sweep.png`, `latency_cdf.png` open and look clean
-- [ ] Terminal font size increased to 18-20pt for readability
-- [ ] Close Slack, email notifications, etc.
+- [ ] `uv run pytest tests/ -q` passes (90 tests)
+- [ ] Four plots open and clean: `ablation_latency.png`, `trajectory_speedup.png`, `sensitivity_sweep.png`, `latency_cdf.png`
+- [ ] Terminal showing `ls agentserve/engine/` ready for the architecture section
+- [ ] Font size 18–20pt, notifications off, clean desktop
+- [ ] Have `notes/findings.md` open as a reference for exact numbers
 
-Suggested recording order:
-1. Record the live `demo.py` section first — takes the most takes
-2. Record the hook and system overview
-3. Record the results walkthrough with plots pre-opened
-4. Edit: cut 30 seconds from each plot section if running long
+Key numbers to have memorised:
+- **−32%** easy latency (modes b–d vs FIFO, max_tokens=64)
+- **−41%** easy latency at max_tokens=256 (grows with sequence length)
+- **6×** ReAct trajectory speedup (traj_progress)
+- **2.6×** Plan-Execute speedup (traj_deadline)
+- **0.99×** priority scheduling alone on trajectories (no improvement)
+- **66% → 65%** sensitivity sweep (0% to 50% noise)
+- **78%** scheduling benefit at 3% easy workload, **9%** at 75% easy
+- **90%** prefix cache hit rate on real SWE-bench sessions
+- **0%** easy requests in real SWE-bench traces (vs 60% synthetic)
