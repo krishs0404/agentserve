@@ -111,6 +111,12 @@ class Engine:
             device = "cuda" if (not use_mock and torch.cuda.is_available()) else "cpu"
         self.device = device
 
+        # Enable TF32 tensor cores on Ampere+ GPUs (A10G, A100, H100).
+        # TF32 is ~10x faster than full float32 for matmuls with negligible accuracy loss.
+        # SDPA already uses fp16; this helps any remaining fp32 accumulation paths.
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")
+
         # Model: real or mock
         if use_mock:
             self.model = MockModel(config)
