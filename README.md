@@ -76,6 +76,16 @@ Workload: 100 synthetic agent requests — 64 easy (classification/extraction), 
 
 *Benchmarked with Flash Attention 2 (PyTorch SDPA) on A10G, Llama 3.2-1B, 100 requests.*
 
+**Full-stack throughput progression** (mode (d) All 3 Policies):
+
+| Config | Throughput | Gain |
+|---|---|---|
+| PyTorch 2.4, no compile (baseline) | 330 tok/s | — |
+| + PyTorch 2.5 + TF32 tensor cores | 377 tok/s | +14% |
+| + `torch.compile` | **555 tok/s** | **+68% total** |
+
+torch.compile particularly benefits scheduling-heavy modes where Python overhead between GPU ops becomes the bottleneck without JIT. Mode (d) gains 47% from compile alone while FIFO gains ~13% — the preemption and overflow logic compresses away.
+
 **Key findings:**
 
 Modes (b)–(d) cut easy-request latency **~32%** (11.9 s → 8.0 s) at the cost of making hard requests wait ~82% longer. This is the right tradeoff when easy requests are blocking agent DAG dependencies.
