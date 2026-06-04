@@ -2,7 +2,7 @@
 
 **A custom LLM inference engine built for agents, not chatbots — with scheduling policies that understand the structure of agentic workloads.**
 
-**Project track:** Research | **Course:** CS 194/294 | **GitHub:** https://github.com/krishs0404/agentserve
+
 
 ---
 
