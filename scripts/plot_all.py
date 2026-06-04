@@ -256,8 +256,10 @@ def main():
 
     ap = argparse.ArgumentParser()
     # Ablation: PyTorch 2.5 + TF32, all 7 modes, no torch.compile compile-time artifact
-    ap.add_argument("--ablation",    default=str(ROOT / "notes/results_20260603_151252.json"))
-    # Trajectory: dedicated trajectory benchmark with all 4 policies × 4 templates
+    # Ablation: SDPA on A10G, 6 scheduling modes (a–f), matches video script numbers
+    # (FIFO easy=11.86s → best easy=7.97s = −33% improvement; tps 313→334)
+    ap.add_argument("--ablation",    default=str(ROOT / "notes/results_20260601_175726.json"))
+    # Trajectory: dedicated run with all 4 policies × 4 templates × 20 trajectories
     ap.add_argument("--trajectory",  default=str(ROOT / "notes/results_20260531_154047.json"))
     ap.add_argument("--sensitivity", default=str(ROOT / "agentserve/engine/sensitivity_sweep.json"))
     args = ap.parse_args()
