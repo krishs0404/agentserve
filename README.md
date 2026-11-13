@@ -12,9 +12,12 @@ behind short-request priority and motivates better evaluation before performance
 |---|---|
 | Numerical correctness | CPU regression coverage for repeated, mixed-length batched decoding and tiny Hugging Face Llama parity |
 | Recorded trace study | 24,880 turns, 767 sessions, five session-held-out splits; raw predictions and split manifests included |
-| Pretrained Llama 3.2 parity | Unvalidated; model implementation lacks checkpoint RoPE scaling |
+| Pretrained Llama 3.2 parity | Unvalidated; scaled RoPE tested against Hugging Face on random weights; intended checkpoint access is gated |
 | GPU scheduling speedups | Historical measurements require reruns after correctness fixes |
 | Whole-session latency and fairness | Open questions; no validated result from dependency-preserving replay |
+
+Read the [research walkthrough and discussion questions](docs/research-guide.md)
+for the project rationale, architecture, and defensible talking points.
 
 Read the [experiment report](docs/length-prediction.md) for methods, uncertainty,
 negative results, and limitations. [Historical notes](docs/historical-results.md)
@@ -50,8 +53,18 @@ The HTTP interface and engine are research scaffolding, with no production SLA.
 
 ## Next experiment
 
-First validate checkpoint configuration, scaled RoPE, logits, and repeated greedy
-decode against Hugging Face with identical pretrained weights and tokenization.
+Scaled RoPE and strict checkpoint-configuration checks are implemented and tested.
+Pretrained validation still requires an accessible local checkpoint:
+
+```bash
+python scripts/validate_checkpoint.py /path/to/checkpoint --device cuda --out /tmp/parity.json
+```
+
+This compares float32 prefill logits and eight mixed-length batched decode steps
+against Hugging Face, checking greedy tokens and reporting numerical errors. It
+is a bounded correctness check, not a throughput benchmark or exhaustive validation.
+The command was smoke-tested with a synthetic saved checkpoint; access to the
+intended pretrained Llama checkpoint is gated on this workstation.
 Then replay sessions causally: next arrival = previous completion + recorded tool
 wait. Compare identical arrivals and workloads across policies after warmup, with
 multiple repetitions. Report whole-session completion time, request p50/p95/p99,

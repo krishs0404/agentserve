@@ -51,9 +51,32 @@ sets mean the five splits are not independent replications; these intervals do
 not cover dataset collection bias or future workload shift.
 
 The previous-turn predictor has lower long-output error, but higher aggregate
-error. A single mean hides that tradeoff. MAE also does not establish ranking
+error. A single mean hides that tradeoff. MAE alone does not establish ranking
 quality, short-job identification, scheduler throughput, or fairness. This study
 does not prove that priority scheduling helps or hurts completion time.
+
+## Ordering diagnostic: different from calibration
+
+A scheduler needs useful ordering, not necessarily precise token counts. For each
+split, sample 20,000 pairs with a fixed seed, excluding same-session pairs and
+pairs with equal recorded lengths. Give correct ordering one point, incorrect
+ordering zero, and prediction ties half a point. All predictors use identical pairs.
+
+| Predictor | Mean pair ordering accuracy | Mean prediction tie rate |
+|---|---:|---:|
+| Constant median | 50.00% | 100.00% |
+| Keywords | 49.48% | 88.71% |
+| Previous turn | 63.36% | 0.68% |
+
+These are descriptive split means, not significance tests. Previous-turn length
+ranks better despite worse MAE: calibration and ordering are different objectives.
+Keywords mostly assign the same estimate, so they rarely distinguish pairs.
+Per-split observed keyword-bucket medians and counts are saved in the summary.
+
+Random cross-session pairs do not establish that requests actually compete in a
+queue. This is not a scheduling experiment, and the metric does not account for
+context length, prefill cost, batching, dependencies, or tool latency. A fair
+follow-up tests this signal in a causal queue and measures long-job penalties.
 
 ## Reproducibility
 
@@ -84,12 +107,21 @@ It cannot support prefix hit rates or GPU/session speedup claims.
 
 Workstation inspection found an RTX 5090 (32 GB), driver 580.178.04, with roughly
 15.9 GB occupied by other processes. Cached checkpoints were delta_net and huginn,
-not Llama. No other process was stopped and no GPU benchmark was run. The Llama
-implementation computes ordinary theta-based RoPE and has no scaling field;
-pretrained Llama 3.2 parity remains unvalidated. Correctness must precede timing.
+not Llama. No other process was stopped and no GPU benchmark was run. The initial inspection found missing Llama 3.2 RoPE scaling. This has now been
+implemented, with independent Hugging Face random-weight tests for rotations and
+repeated decoding around position 8192. Checkpoint loading now validates config
+and permits embedding fallback only for tied checkpoints. The intended checkpoint
+returned GatedRepoError, so pretrained Llama 3.2 parity remains unvalidated.
+`validate_checkpoint.py` provides the local-checkpoint comparison command and was
+smoke-tested on synthetic saved weights. Correctness must precede timing.
 
 A useful follow-up is a dependency-preserving replay with explicit tool waits,
 paired workloads, burst/concurrency sweeps, and long-request slowdown. The current
 converter's fixed two-second generation estimate must not be treated as measured
 service time. [TraceLab](https://arxiv.org/abs/2606.30560) motivates those dimensions;
 its results are external context, not evidence about this engine.
+
+New trace conversions now preserve source row order (context length is not a turn
+index) and retain `turn_index`, `depends_on`, and `pre_gap_ms`. The fixed-generation
+arrival field remains for older consumers and is explicitly labeled approximate.
+Existing committed traces have not been regenerated; they lack these new fields.

@@ -60,7 +60,8 @@ class RMSNorm(nn.Module):
 # Rotary positional embeddings (RoPE)
 # ---------------------------------------------------------------------------
 
-def precompute_rope_freqs(head_dim: int, max_seq_len: int, theta: float = 10000.0) -> torch.Tensor:
+def precompute_rope_freqs(head_dim: int, max_seq_len: int, theta: float = 10000.0,
+                          rope_scaling: dict | None = None) -> torch.Tensor:
     """Precompute (cos, sin) rotation matrix for all positions up to max_seq_len.
 
     Returns a tensor of shape [max_seq_len, head_dim] where the first half is cos
@@ -68,6 +69,18 @@ def precompute_rope_freqs(head_dim: int, max_seq_len: int, theta: float = 10000.
     """
     # Inverse frequencies: [head_dim // 2]
     inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+    if rope_scaling is not None:
+        r = rope_scaling
+        if r.get("rope_type", r.get("type")) != "llama3":
+            raise ValueError("Unsupported RoPE scaling")
+        wavelength = 2 * torch.pi / inv_freq
+        low = r["original_max_position_embeddings"] / r["low_freq_factor"]
+        high = r["original_max_position_embeddings"] / r["high_freq_factor"]
+        smooth = (r["original_max_position_embeddings"] / wavelength - r["low_freq_factor"]) / (r["high_freq_factor"] - r["low_freq_factor"])
+        scaled = inv_freq / r["factor"]
+        interpolated = (1 - smooth) * scaled + smooth * inv_freq
+        inv_freq = torch.where(wavelength > low, scaled,
+                               torch.where(wavelength < high, inv_freq, interpolated))
     # positions: [max_seq_len]
     positions = torch.arange(max_seq_len, dtype=torch.float32)
     # outer product: [max_seq_len, head_dim // 2]
@@ -83,7 +96,7 @@ def apply_rope(x: torch.Tensor, cos_sin: torch.Tensor) -> torch.Tensor:
     x:      [T, n_heads, head_dim]
     cos_sin:[T, head_dim]  (first half = cos, second half = sin for each position)
 
-    The rotation pairs up dimensions (0,1), (2,3), ..., (D-2,D-1).
+    The rotation pairs the first and second halves, matching Hugging Face Llama.
     """
     T, n_heads, head_dim = x.shape
     # Split x into pairs: [..., head_dim//2] each
@@ -258,7 +271,7 @@ class LlamaModel(nn.Module):
         self.lm_head = nn.Linear(config.hidden_dim, config.vocab_size, bias=False)
 
         # Precompute RoPE table once; reused for all calls
-        cos_sin = precompute_rope_freqs(config.head_dim, config.max_seq_len, config.rope_theta)
+        cos_sin = precompute_rope_freqs(config.head_dim, config.max_seq_len, config.rope_theta, config.rope_scaling)
         self.register_buffer("rope_table", cos_sin, persistent=False)  # [max_seq_len, head_dim]
 
     @torch.inference_mode()

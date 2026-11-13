@@ -74,13 +74,12 @@ def _format_prompt(messages: list[dict]) -> str:
 def _session_arrival_times(iterations: list[dict], session_start_ms: float) -> list[float]:
     """
     Compute absolute arrival time (ms from benchmark start) for each iteration
-    in a session. The first iteration starts at session_start_ms. Each subsequent
-    iteration arrives after the previous one's pre_gap (tool execution time).
+    in a session. The first iteration starts at session_start_ms. Later arrivals
+    assume two seconds of generation plus the next turn's recorded pre_gap.
 
-    We don't know the previous iteration's generation latency, so we use only
-    pre_gap as the inter-request spacing (conservative: ignores generation time,
-    which means concurrent sessions will overlap heavily — realistic for a busy
-    serving system).
+    These are approximate open-loop arrivals, not causal replay. A closed-loop
+    consumer must release turn i only after completion(i-1) + pre_gap_ms[i].
+    The trace records retain both the dependency and original tool gap.
     """
     times = []
     t = session_start_ms
@@ -121,9 +120,8 @@ def load_dataset(n_sessions: int, source_filter: str | None) -> dict[str, list[d
             continue
         sessions[sid].append(dict(row))
 
-    # Sort iterations within each session (they're already ordered but enforce it)
-    for sid in sessions:
-        sessions[sid].sort(key=lambda r: len(r.get("input", [])))
+    # Preserve source row order. Context length is not a turn index: truncation,
+    # compaction, and tool message formats can shorten later contexts.
 
     # Limit to n_sessions
     limited = dict(list(sessions.items())[:n_sessions])
@@ -150,11 +148,15 @@ def build_trace(
         iters = iters[:max_iters_per_session]
         arrivals = _session_arrival_times(iters, session_start)
 
-        for it, arrival_ms in zip(iters, arrivals):
+        for turn_index, (it, arrival_ms) in enumerate(zip(iters, arrivals)):
             prompt = _format_prompt(it.get("input", []))
             output_len = it.get("output_length", 64)
             records.append({
                 "session_id":       sid,
+                "turn_index":       turn_index,
+                "depends_on":       turn_index - 1 if turn_index else None,
+                "pre_gap_ms":       float(it.get("pre_gap", 0.0)) * 1000,
+                "timing_kind":      "approximate_open_loop_2s_generation",
                 "arrival_delay_ms": round(arrival_ms, 1),
                 "prompt":           prompt,
                 "max_tokens":       min(output_len, 256),  # cap for engine throughput

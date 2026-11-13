@@ -18,12 +18,15 @@ Llama 3.2 weight names on HuggingFace map to our module names as follows:
   lm_head.weight                            → lm_head.weight
 """
 
+import json
 import os
+from dataclasses import asdict
 from glob import glob
+
 from safetensors import safe_open
 
+from agentserve.model.config import ModelConfig
 from agentserve.model.llama import LlamaModel
-
 
 # Maps HuggingFace weight name fragments → our parameter name fragments.
 _HF_NAME_MAP = {
@@ -63,6 +66,16 @@ def _hf_to_ours(hf_name: str) -> str | None:
 
 def load_weights(model: LlamaModel, model_dir: str) -> None:
     """Load safetensor weights from a HuggingFace model directory into model."""
+    with open(os.path.join(model_dir, "config.json")) as config_file:
+        checkpoint_config = ModelConfig.from_hf_dict(json.load(config_file))
+    expected, actual = asdict(checkpoint_config), asdict(model.config)
+    # Smaller position tables are safe for explicitly bounded experiments.
+    actual["max_seq_len"] = expected["max_seq_len"]
+    mismatches = [key for key in expected if expected[key] != actual[key]]
+    if mismatches:
+        raise ValueError(f"Model/checkpoint configuration mismatch: {mismatches}")
+    if model.config.max_seq_len > checkpoint_config.max_seq_len:
+        raise ValueError("Position table exceeds checkpoint context limit")
     safetensor_files = sorted(glob(os.path.join(model_dir, "*.safetensors")))
     if not safetensor_files:
         raise FileNotFoundError(f"No .safetensors files found in {model_dir}")
@@ -83,7 +96,11 @@ def load_weights(model: LlamaModel, model_dir: str) -> None:
                 loaded.add(our_name)
 
     # Llama 3.2 ties lm_head to embed_tokens — no separate tensor in the file.
-    if "lm_head.weight" not in loaded and "lm_head.weight" in param_dict and "embed.weight" in param_dict:
+    if (
+        checkpoint_config.tie_word_embeddings
+        and "lm_head.weight" not in loaded
+        and "embed.weight" in loaded
+    ):
         param_dict["lm_head.weight"].data.copy_(param_dict["embed.weight"].data)
         loaded.add("lm_head.weight")
 

@@ -173,6 +173,13 @@ class Scheduler:
 
     def get_prefill_batch(self) -> List[Request]:
         """Return up to max_prefill_per_step requests to prefill this step."""
+        if self.policy is not None and self._policy_pending:
+            # Deadline pressure changes while requests wait; insertion-time keys
+            # are insufficient. Preserve sequence numbers for stable ties.
+            self._policy_pending = sorted(
+                (self.policy.priority_key(req), seq, req)
+                for _, seq, req in self._policy_pending
+            )
         if self.use_relative_batching:
             return self._get_prefill_batch_relative()
         if self.use_combined_batching:
