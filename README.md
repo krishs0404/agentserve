@@ -4,6 +4,13 @@ A personal ML systems prototype for studying scheduling in multi-step agent work
 Implemented in PyTorch: grouped-query Llama attention, continuous batching, ordinary
 and paged KV storage, prefix reuse, and request/trajectory scheduling policies.
 
+![AgentServe overview: admission scheduling and KV-cached decoding within an agent loop; previous-turn length achieves 63.4% pair ordering accuracy versus 49.5% for keywords.](docs/figures/overview.png)
+
+*Left: conceptual system and agent loop. Right: recorded trace ordering accuracy;
+dots show five session-held-out splits, diamonds their means, and prediction ties
+receive half credit. Pairs with equal output lengths are excluded. These are not
+GPU or session-latency results. [Methods and limitations](docs/length-prediction.md).*
+
 **Current finding:** keyword output-length estimates fail to beat a constant
 training-set median on held-out agent sessions. That challenges an assumption
 behind short-request priority and motivates better evaluation before performance claims.
@@ -33,7 +40,8 @@ python scripts/study_lengths.py
 ```
 
 The trace study itself uses only the Python standard library and the repository
-classifier. It runs on CPU, without a model download. The default input is already
+classifier. It runs on CPU, without a model download. Regenerate the overview
+figure with `python scripts/plot_overview.py` after running the study. The default input is already
 tracked. Results go to `experiments/length_prediction/`: dataset SHA-256, exact
 train/test session IDs, all held-out predictions, and metrics for every seed.
 
