@@ -16,9 +16,6 @@ behind short-request priority and motivates better evaluation before performance
 | GPU scheduling speedups | Historical measurements require reruns after correctness fixes |
 | Whole-session latency and fairness | Open questions; no validated result from dependency-preserving replay |
 
-Read the [research walkthrough and discussion questions](docs/research-guide.md)
-for the project rationale, architecture, and defensible talking points.
-
 Read the [experiment report](docs/length-prediction.md) for methods, uncertainty,
 negative results, and limitations. [Historical notes](docs/historical-results.md)
 retain earlier exploratory results for provenance only.
