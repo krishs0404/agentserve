@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-AgentServe Live Scheduling Demo
+AgentServe Mock Scheduling Demo
+
+Illustrative synthetic workload using MockModel and artificial step delays.
+This visualization is not an inference benchmark or a measured GPU result.
 
 Two engines process the same agent workload side-by-side:
   Left  — FIFO baseline (no scheduling intelligence)
@@ -267,7 +270,7 @@ MODES = {
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="AgentServe live scheduling demo")
+    ap = argparse.ArgumentParser(description="AgentServe mock scheduling visualization (not an inference benchmark)")
     ap.add_argument(
         "--mode", default="priority",
         choices=list(MODES.keys()),

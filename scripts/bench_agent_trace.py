@@ -1,8 +1,10 @@
 """
 Replay a recorded agent trace through the engine.
 
-Headline metric: total wall-clock time from first request to last completion.
-This is what the end user actually experiences — total task completion time.
+Open-loop replay using fixed arrival timestamps. Total wall time is workload
+makespan, not causal agent-session completion time: later turns are not held
+until their predecessors finish. Mock runs measure Python scheduling behavior,
+not GPU inference performance.
 
 Usage:
   uv run python scripts/bench_agent_trace.py --trace traces/synthetic_50.jsonl --agent-aware
@@ -95,6 +97,8 @@ def replay_trace(
         by_diff[r.difficulty] = by_diff.get(r.difficulty, 0) + 1
 
     return {
+        "replay_mode": "open_loop_fixed_arrivals",
+        "execution_mode": "mock" if use_mock else "model_inference",
         "total_wall_time_s": total_wall,
         "requests_total":    len(trace),
         "requests_completed": len(completed),

@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate the four plots that tell the AgentServe story.
+Plot historical exploratory benchmark artifacts.
 
-  1. ablation_latency.png   — easy vs hard latency across all 5 scheduling modes
-                              (the headline result: what does agent-aware scheduling buy you?)
-  2. trajectory_speedup.png — TCT speedup over FIFO per policy × template
-                              (trajectory-aware policies: 6× for react, 2.6× for plan-execute)
-  3. sensitivity_sweep.png  — scheduling benefit vs classifier noise
-                              (robustness: still +65% benefit at 50% random labelling)
-  4. latency_cdf.png        — easy-request latency CDF across all modes
-                              (shows distribution shift, not just mean)
+Default inputs predate correctness fixes. Generated charts are labeled historical
+and must not be cited as validated performance results. See notes/README.md.
 
 Usage:
     uv run python scripts/plot_all.py
@@ -60,9 +54,11 @@ TEMPLATE_LABELS = ["ReAct\n(3-step)", "Plan-Execute\n(4-step)",
 
 def _save(fig, name: str) -> None:
     path = OUTDIR / name
+    fig.text(.5, .005, "Historical exploratory data — requires rerun after correctness fixes",
+             ha="center", fontsize=8, color="dimgray")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print(f"  {path.relative_to(ROOT)}")
+    print(f"  {path}")
 
 
 # ── Plot 1: Easy vs Hard latency — the headline ablation ──────────────────────
@@ -255,28 +251,28 @@ def plot_easy_cdf(ablation_path: Path) -> None:
 def main():
 
     ap = argparse.ArgumentParser()
-    # Ablation: PyTorch 2.5 + TF32, all 7 modes, no torch.compile compile-time artifact
-    # Ablation: SDPA on A10G, 6 scheduling modes (a–f), matches video script numbers
-    # (FIFO easy=11.86s → best easy=7.97s = −33% improvement; tps 313→334)
+    # Historical inputs; performance has not been revalidated.
     ap.add_argument("--ablation",    default=str(ROOT / "notes/results_20260601_175726.json"))
     # Trajectory: dedicated run with all 4 policies × 4 templates × 20 trajectories
     ap.add_argument("--trajectory",  default=str(ROOT / "notes/results_20260531_154047.json"))
     ap.add_argument("--sensitivity", default=str(ROOT / "agentserve/engine/sensitivity_sweep.json"))
     args = ap.parse_args()
 
-    print("Generating plots → notes/plots/\n")
+    print("Generating historical plots → notes/plots/\n")
 
-    print("1. Ablation latency (easy vs hard, all modes):")
-    plot_ablation_latency(Path(args.ablation))
-
-    print("\n2. Trajectory speedup over FIFO:")
-    plot_trajectory_speedup(Path(args.trajectory))
-
-    print("\n3. Sensitivity sweep:")
-    plot_sensitivity(Path(args.sensitivity))
-
-    print("\n4. Easy-request latency CDF:")
-    plot_easy_cdf(Path(args.ablation))
+    jobs = [
+        ("Ablation latency", args.ablation, plot_ablation_latency),
+        ("Trajectory speedup", args.trajectory, plot_trajectory_speedup),
+        ("Sensitivity sweep", args.sensitivity, plot_sensitivity),
+        ("Easy-request latency CDF", args.ablation, plot_easy_cdf),
+    ]
+    for label, source, plot in jobs:
+        print(f"\n{label}:")
+        path = Path(source)
+        if not path.is_file():
+            print(f"  [skip] historical input unavailable: {path}")
+            continue
+        plot(path)
 
     print("\nDone.")
 

@@ -22,7 +22,9 @@ retain earlier exploratory results for provenance only.
 
 ## Reproduce
 
-Python 3.11 or newer. From the repository root:
+Python 3.11 or newer. The Hugging Face reference is pinned to Transformers 4.48.3;
+its configuration API is used by the numerical validation. Transformers 5 is not
+currently supported. From the repository root:
 
 ```bash
 python -m pip install -e '.[dev]'
@@ -43,6 +45,10 @@ train/test session IDs, all held-out predictions, and metrics for every seed.
 - `agentserve/server/`: HTTP serving interface.
 - `scripts/`: benchmark drivers, trace conversion, and the reproducible trace study.
 - `tests/`: numerical parity, cache, scheduling, tokenization, and leakage checks.
+- [`notes/`](notes/README.md): data provenance and an index of historical artifacts.
+
+For an illustrative terminal demo, run `python scripts/demo.py --help`. The demo
+uses a mock model and artificial delays; its timings are not inference results.
 
 Priority, overflow, preemption, and relative batching are experimental mechanisms.
 Their implementation does not establish better end-to-end agent performance.
@@ -62,8 +68,9 @@ against Hugging Face, checking greedy tokens and reporting numerical errors. It
 is a bounded correctness check, not a throughput benchmark or exhaustive validation.
 The command was smoke-tested with a synthetic saved checkpoint; access to the
 intended pretrained Llama checkpoint is gated on this workstation.
+
 Then replay sessions causally: next arrival = previous completion + recorded tool
-wait. Compare identical arrivals and workloads across policies after warmup, with
+wait. Compare identical initial session arrivals and workloads across policies after warmup, with
 multiple repetitions. Report whole-session completion time, request p50/p95/p99,
 long-request slowdown, and starvation alongside aggregate latency.
 

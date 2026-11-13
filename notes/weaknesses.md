@@ -1,6 +1,8 @@
 # AgentServe — Design Audit: Original Weaknesses and Resolutions
 
-*Phase 1 audit captured during initial build. All three core weaknesses have since been resolved.*
+> Historical implementation audit, written before the decoding, tokenization,
+> and RoPE fixes. Resolution and performance statements below have not been
+> revalidated on the corrected implementation. See [current evidence](../docs/length-prediction.md).
 
 ---
 
