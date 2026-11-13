@@ -1,98 +1,89 @@
 # AgentServe
 
-A personal ML systems prototype for studying scheduling in multi-step agent workloads.
-Implemented in PyTorch: grouped-query Llama attention, continuous batching, ordinary
-and paged KV storage, prefix reuse, and request/trajectory scheduling policies.
+An experimental PyTorch inference engine for studying scheduling in multi-step
+agent workloads: continuous batching, grouped-query Llama attention, ordinary and
+paged KV storage, prefix reuse, and request/trajectory scheduling policies.
 
-![AgentServe overview: admission scheduling and KV-cached decoding within an agent loop; previous-turn length achieves 63.4% pair ordering accuracy versus 49.5% for keywords.](docs/figures/overview.png)
+![AgentServe architecture and recorded trace ordering results.](docs/figures/overview.png)
 
-*Left: conceptual system and agent loop. Right: recorded trace ordering accuracy;
-dots show five session-held-out splits, diamonds their means, and prediction ties
-receive half credit. Pairs with equal output lengths are excluded. These are not
-GPU or session-latency results. [Methods and limitations](docs/length-prediction.md).*
+*Conceptual agent loop and recorded trace statistics. Dots show five held-out
+splits; diamonds show their means. These are not GPU or session-latency results.*
 
-**Current finding:** keyword output-length estimates fail to beat a constant
-training-set median on held-out agent sessions. That challenges an assumption
-behind short-request priority and motivates better evaluation before performance claims.
+## Research question
 
-| Evidence | Status |
-|---|---|
-| Numerical correctness | CPU regression coverage for repeated, mixed-length batched decoding and tiny Hugging Face Llama parity |
-| Recorded trace study | 24,880 turns, 767 sessions, five session-held-out splits; raw predictions and split manifests included |
-| Pretrained Llama 3.2 parity | Unvalidated; scaled RoPE tested against Hugging Face on random weights; intended checkpoint access is gated |
-| GPU scheduling speedups | Historical measurements require reruns after correctness fixes |
-| Whole-session latency and fairness | Open questions; no validated result from dependency-preserving replay |
+Can inexpensive signals help a scheduler finish agent sessions sooner, without
+unfairly delaying long requests? Agent sessions alternate LLM calls and tools, so
+improving individual request latency may not improve whole-session completion.
+The engine implements FIFO, priority, overflow, preemption, relative batching,
+and trajectory progress/deadline heuristics for investigating this question.
 
-Read the [experiment report](docs/length-prediction.md) for methods, uncertainty,
-negative results, and limitations. [Historical notes](docs/historical-results.md)
-retain earlier exploratory results for provenance only.
+## Experiment: output-length signals
+
+**24,880 recorded turns, 767 sessions, four models.** Five seeded 80/20 splits
+keep each session entirely in training or test. Compare a training-set median,
+the existing keyword heuristic, and the previous observed output in the same
+session (training median on its first turn).
+
+| Predictor | Token-count MAE ↓ | Pair ordering accuracy ↑ |
+|---|---:|---:|
+| Training median | 144.49 | 50.00% |
+| Keywords | 147.66 | 49.48% |
+| Previous turn | 164.43 | 63.36% |
+
+Values average five splits. Ordering samples 20,000 pairs per split, excluding
+same-session pairs and equal output lengths; prediction ties receive half credit.
+Keywords tie on 88.71% of evaluated pairs. Previous-turn length ranks better
+despite worse absolute error: **calibration and ordering are different objectives.**
+This identifies a candidate signal, not a validated scheduling improvement.
+
+Raw predictions, exact session splits, dataset SHA-256, session-weighted errors,
+and session-bootstrap intervals are in `experiments/length_prediction/`.
+Overlapping splits are not independent replications. Prompts are truncated last
+user/tool messages; model-specific token counts and related tasks limit generalization.
+The extract has no pinned upstream revision.
 
 ## Reproduce
 
-Python 3.11 or newer. The Hugging Face reference is pinned to Transformers 4.48.3;
-its configuration API is used by the numerical validation. Transformers 5 is not
-currently supported. From the repository root:
+Python 3.11+; Transformers is pinned to the tested 4.48.3 reference.
 
 ```bash
 python -m pip install -e '.[dev]'
 python -m pytest -q
 python scripts/study_lengths.py
+python scripts/plot_overview.py
 ```
 
-The trace study itself uses only the Python standard library and the repository
-classifier. It runs on CPU, without a model download. Regenerate the overview
-figure with `python scripts/plot_overview.py` after running the study. The default input is already
-tracked. Results go to `experiments/length_prediction/`: dataset SHA-256, exact
-train/test session IDs, all held-out predictions, and metrics for every seed.
+The trace study needs no GPU or model download. Input is tracked at
+`notes/lmcache_lmcache_787_pairs.jsonl` (767 sessions despite its filename).
+`agentserve/model/` contains inference, `agentserve/engine/` scheduling and caches,
+and `agentserve/server/` the experimental HTTP interface.
 
-## Architecture
+## Validation and limits
 
-- `agentserve/model/`: Llama implementation and safetensors loader.
-- `agentserve/engine/`: scheduler, length estimates, KV allocation, prefix cache,
-  request lifecycle, and trajectory policies.
-- `agentserve/server/`: HTTP serving interface.
-- `scripts/`: benchmark drivers, trace conversion, and the reproducible trace study.
-- `tests/`: numerical parity, cache, scheduling, tokenization, and leakage checks.
-- [`notes/`](notes/README.md): data provenance and an index of historical artifacts.
-
-For an illustrative terminal demo, run `python scripts/demo.py --help`. The demo
-uses a mock model and artificial delays; its timings are not inference results.
-
-Priority, overflow, preemption, and relative batching are experimental mechanisms.
-Their implementation does not establish better end-to-end agent performance.
-The HTTP interface and engine are research scaffolding, with no production SLA.
-
-## Next experiment
-
-Scaled RoPE and strict checkpoint-configuration checks are implemented and tested.
-Pretrained validation still requires an accessible local checkpoint:
+CPU regression tests cover repeated mixed-length decoding, ordinary/paged KV
+contents, tiny Hugging Face parity, scaled RoPE around position 8192, deadline
+refresh, and leakage checks. Random-weight tests do not establish pretrained or
+CUDA parity. To check an accessible local checkpoint:
 
 ```bash
 python scripts/validate_checkpoint.py /path/to/checkpoint --device cuda --out /tmp/parity.json
 ```
 
-This compares float32 prefill logits and eight mixed-length batched decode steps
-against Hugging Face, checking greedy tokens and reporting numerical errors. It
-is a bounded correctness check, not a throughput benchmark or exhaustive validation.
-The command was smoke-tested with a synthetic saved checkpoint; access to the
-intended pretrained Llama checkpoint is gated on this workstation.
+This checks float32 prefill logits and eight mixed-length batched decode steps.
+It was smoke-tested with synthetic weights; intended Llama checkpoint access is
+gated. **Pretrained parity and current GPU speedups remain unvalidated.**
 
-Then replay sessions causally: next arrival = previous completion + recorded tool
-wait. Compare identical initial session arrivals and workloads across policies after warmup, with
-multiple repetitions. Report whole-session completion time, request p50/p95/p99,
-long-request slowdown, and starvation alongside aggregate latency.
+Old JSON results and PNGs under `notes/` predate correctness fixes and require
+reruns. The terminal demo uses a mock model and artificial delays. Existing trace
+replay fixes arrivals using a two-second generation estimate; it does not measure
+causal session completion. New conversions preserve dependencies and tool gaps,
+but no causal replay result is claimed.
 
-The existing converter assigns a fixed two-second generation duration to create
-arrival times. Those arrivals cannot establish causal whole-session latency.
-The local prompt/output pairs omit full contexts and tool gaps; they cannot measure
-prefix reuse, growing-context GPU cost, or tool-inclusive session completion time.
+Next: validate pretrained inference, then compare policies with identical initial
+session arrivals and causal tool waits. Measure session completion, long-request
+tails, and fairness across burstiness, concurrency, context growth, and prefix reuse.
 
-## References and provenance
-
-- [LMCache dataset documentation](https://huggingface.co/datasets/DiscoPosse/lmcache-agentic-traces), CC BY 4.0. Local pairs were produced by the existing conversion pipeline; see the report for provenance limits.
-- [TraceLab](https://arxiv.org/abs/2606.30560), coding-agent workload characterization. Motivation for studying session structure; its findings are not measurements of AgentServe.
-- [Llama 3.2](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct), intended pretrained reference.
-
-Development used substantial AI assistance (Claude Code and Codex) for implementation,
-debugging, tests, analysis, and documentation. Results should be assessed through
-the committed code, raw artifacts, and stated validation scope.
+Data: [LMCache agentic traces](https://huggingface.co/datasets/DiscoPosse/lmcache-agentic-traces)
+(CC BY 4.0); the original converter names a different upstream namespace.
+[TraceLab](https://arxiv.org/abs/2606.30560) motivates the workload dimensions.
+Development used substantial Claude Code and Codex assistance.
