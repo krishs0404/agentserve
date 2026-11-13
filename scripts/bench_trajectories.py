@@ -35,6 +35,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from agentserve.benchmarking import build_tokenizer
 from agentserve.engine.engine import Engine
 from agentserve.engine.request import Request
 from agentserve.engine.trajectory import TrajectoryGenerator, TrajectorySpec
@@ -99,6 +100,7 @@ def run_trajectory_workload(
     Returns:
         dict trajectory_id -> {"tct": float, "template": str, "missed": bool}
     """
+    tokenize = build_tokenizer(model_dir, use_mock=model_dir is None)
     engine = make_engine(policy, model_dir=model_dir, estimated_tps=estimated_tps,
                          max_batch_size=max_batch_size)
 
@@ -117,7 +119,7 @@ def run_trajectory_workload(
         deadline = t_start_wall + DEADLINE_SLACK * (total_toks / estimated_tps)
 
         step0 = spec.steps[0]
-        req = _make_request(step0.prompt, step0.max_tokens, tid, 0, spec.num_steps, deadline)
+        req = _make_request(step0.prompt, step0.max_tokens, tid, 0, spec.num_steps, deadline, tokenize=tokenize)
         tct_data[tid] = {
             "start": req.arrival_time,
             "end": 0.0,
@@ -143,7 +145,7 @@ def run_trajectory_workload(
                 deadline = tct_data[tid]["deadline"]
                 next_req = _make_request(
                     next_spec.prompt, next_spec.max_tokens,
-                    tid, step_idx, spec.num_steps, deadline,
+                    tid, step_idx, spec.num_steps, deadline, tokenize=tokenize,
                 )
                 engine.submit(next_req)
             else:
@@ -166,10 +168,10 @@ def run_trajectory_workload(
     return results
 
 
-def _make_request(prompt, max_tokens, trajectory_id, step_index, total_steps, deadline) -> Request:
+def _make_request(prompt, max_tokens, trajectory_id, step_index, total_steps, deadline, *, tokenize) -> Request:
     return Request(
         prompt=prompt,
-        token_ids=[ord(c) % 256 for c in prompt],
+        token_ids=tokenize(prompt),
         max_tokens=max_tokens,
         trajectory_id=trajectory_id,
         step_index=step_index,

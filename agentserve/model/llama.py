@@ -359,7 +359,7 @@ class LlamaModel(nn.Module):
 
             # Flash Attention via PyTorch SDPA
             out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=attn_mask)  # [B, H, 1, D]
-            out = out.squeeze(2).transpose(1, 2).reshape(B, H * D) # [B, H*D]
+            out = out.squeeze(2).reshape(B, H * D) # [B, H*D]
             attn_out = layer.attn.o_proj(out)                       # [B, hidden_dim]
 
             # Pre-norm residuals
@@ -369,7 +369,12 @@ class LlamaModel(nn.Module):
             # Save unpadded KV for each request (.detach() redundant in inference_mode)
             for b in range(B):
                 L = seq_lens[b]
-                new_kv_caches[b].append((k_full[b, :L + 1], v_full[b, :L + 1]))
+                # The appended token lives at max_len, after any padding.
+                # Keep the request's history and append its actual new token.
+                new_kv_caches[b].append((
+                    torch.cat([k_padded[b, :L], k_n[b:b + 1]], dim=0),
+                    torch.cat([v_padded[b, :L], v_n[b:b + 1]], dim=0),
+                ))
 
         x = self.norm(x)           # [B, hidden_dim]
         logits = self.lm_head(x)   # [B, vocab_size]
@@ -467,7 +472,7 @@ class LlamaModel(nn.Module):
                 attn_mask.masked_fill_(is_pad[:, None, None, :], float("-inf"))
 
             out = F.scaled_dot_product_attention(q_4d, k_4d, v_4d, attn_mask=attn_mask)
-            out = out.squeeze(2).transpose(1, 2).reshape(B, H * D)
+            out = out.squeeze(2).reshape(B, H * D)
             x = x + layer.attn.o_proj(out)
             x = x + layer.ffn(layer.ffn_norm(x))
 

@@ -1,4 +1,7 @@
-# AgentServe — Key Findings Reference
+# AgentServe — Historical Findings Reference
+
+> These measurements predate the decoding and tokenization correctness fixes.
+> Rerun the corrected implementation before using these numbers as performance claims.
 
 All numbers from GPU runs on A10G, Llama 3.2-1B, unless noted.
 

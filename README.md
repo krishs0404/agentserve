@@ -1,7 +1,31 @@
 # AgentServe
 
-**A custom LLM inference engine built for agents, not chatbots — with scheduling policies that understand the structure of agentic workloads.**
+**A personal ML systems prototype exploring how request and trajectory scheduling affect agent workload latency.**
 
+
+
+
+## Correctness and scope
+
+This project explores scheduling in a single-device PyTorch inference engine.
+It is an experimental prototype, with CPU numerical regression checks covering:
+
+- Batched decode versus full-sequence inference over repeated steps, for both
+  equal and unequal request lengths, using ordinary and paged KV storage.
+- Logits and KV tensor contents, rather than output shapes alone.
+- Prefill and batched decode against a tiny Hugging Face Llama reference with
+  identical random weights (no checkpoint download required).
+- Real-model benchmark tokenization: tokenizer loading errors are fatal;
+  synthetic character IDs are used only in explicit mock mode.
+
+Run `python -m pytest -q` after installing the development dependencies. These
+checks validate the tiny CPU configuration; they do not establish pretrained
+Llama 3.2 parity, CUDA correctness, or production readiness.
+
+**Benchmark status:** the GPU tables and plots below are historical exploratory
+measurements from before the batched-decoding and trajectory-tokenization fixes.
+They need to be rerun on the corrected code before quoting performance gains.
+The historical data is retained for traceability.
 
 
 ---
@@ -18,7 +42,7 @@ Standard inference engines (vLLM, SGLang) don't know this. They see a stream of 
 
 ## What AgentServe Builds
 
-A complete inference engine — PyTorch attention, paged KV-cache, continuous batching, prefix cache — layered with scheduling policies that exploit agent workload structure.
+A prototype inference engine — PyTorch attention, paged KV-cache, continuous batching, prefix cache — layered with scheduling policies that exploit agent workload structure.
 
 ### Difficulty Classifier
 
@@ -30,7 +54,7 @@ Every incoming prompt is classified in under 1ms before it reaches the scheduler
 
 ### Scheduling Policies
 
-Six modes, each additive on top of the previous:
+Six scheduling configurations:
 
 | Mode | Mechanism |
 |---|---|
@@ -59,7 +83,7 @@ On real multi-turn agent traces (669 SWE-bench sessions sharing a ~14K-token sys
 
 ---
 
-## Results
+## Results (historical; rerun required)
 
 All GPU benchmarks run on **Llama 3.2-1B** on a single **NVIDIA A10G** (24 GB).
 

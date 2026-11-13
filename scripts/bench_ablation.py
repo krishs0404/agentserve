@@ -43,24 +43,7 @@ from agentserve.engine.request import Request
 from agentserve.model.config import TinyConfig, Llama32_1B, Llama32_3B, Llama32_8B
 
 
-def build_tokenizer(model_dir: str | None, use_mock: bool) -> Callable[[str], list[int]]:
-    """Return a tokenize(text) -> list[int] function.
-
-    Uses the real Llama tokenizer when model_dir is provided; falls back to
-    ord(c) % 256 for mock/CPU runs.  The fake tokenizer is fast and keeps tests
-    dependency-free, but it produces ~3-5× more tokens than BPE for the same
-    prompt — fine for intra-mode comparison, misleading for vLLM throughput.
-    """
-    if model_dir and not use_mock:
-        try:
-            from transformers import AutoTokenizer
-            tok = AutoTokenizer.from_pretrained(model_dir)
-            print(f"  Loaded tokenizer from {model_dir} (vocab size {tok.vocab_size})")
-            return lambda text: tok.encode(text, add_special_tokens=False)
-        except Exception as e:
-            print(f"  WARNING: could not load tokenizer from {model_dir}: {e}")
-            print("  Falling back to ord(c) % vocab_size fake tokenizer.")
-    return lambda text: [ord(c) % 256 for c in text]
+from agentserve.benchmarking import build_tokenizer
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
